@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ERP Once</title>
+<style>
+:root{--bg:#f3f5f8;--fg:#0f1b33;--mut:#5d6b85;--card:#fff;--ac:#f2b705;--acf:#0f1b33;--bd:#d5dbe6}
+@media(prefers-color-scheme:dark){:root{--bg:#0d1424;--fg:#e8ecf5;--mut:#8f9bb5;--card:#16203a;--bd:#2a3556}}
+*{box-sizing:border-box}
+body{margin:0;font:16px/1.4 "Avenir Next","Segoe UI",system-ui,sans-serif;background:var(--bg);color:var(--fg)}
+main{max-width:720px;margin:auto;padding:16px}
+h1{font-size:22px;margin:0 0 12px;letter-spacing:-.01em}
+input,button{font:inherit;padding:11px 12px;border:1px solid var(--bd);border-radius:6px;background:var(--card);color:var(--fg);width:100%;margin:4px 0}
+button{background:var(--ac);color:var(--acf);border:0;cursor:pointer;font-weight:700}
+button.s{background:var(--card);color:var(--fg);border:1px solid var(--bd)}
+:focus-visible{outline:2px solid var(--ac);outline-offset:2px}
+nav{display:flex;gap:6px;margin-bottom:12px}
+nav button{margin:0}
+.c{background:var(--card);border:1px solid var(--bd);border-radius:6px;padding:10px 12px;margin:8px 0}
+.m{color:var(--mut);font-size:14px}
+.r{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.r button{width:auto}
+summary{cursor:pointer;font-weight:700;padding:8px 0}
+#msg{font-size:14px;color:var(--mut);min-height:20px;margin-top:8px}
+</style>
+</head>
+<body>
+<main><div id="app"></div><div id="msg"></div></main>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script>
+const sb = supabase.createClient(
+  'https://foxzcnctjohuqtoonpfb.supabase.co',
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZveHpjbmN0am9odXF0b29ucGZiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTA5MjA4NjMsImV4cCI6MjEwNjQ5Njg2M30.6F1Mf5hCYD_PWe1ZOSt_zY52t7oapGZRM3prwQkcZG4'
+);
+const $ = s => document.querySelector(s);
+const S = { bid: null, bname: '', lists: [], tab: 'prod' };
+const say = t => { $('#msg').textContent = t || ''; };
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const fmt = n => Number(n).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const num = s => {
+  s = String(s ?? '').trim().replace(/[$\s]/g, '');
+  if (s.includes(',')) s = s.replace(/\./g, '').replace(',', '.');
+  return s === '' ? '' : +s;
+};
+
+/* ---------- Acceso ---------- */
+async function init() {
+  const { data: { session } } = await sb.auth.getSession();
+  session ? load() : authView();
+}
+function authView() {
+  $('#app').innerHTML = `<h1>ERP Once</h1>
+    <input id="em" type="email" placeholder="Email" autocomplete="email">
+    <input id="pw" type="password" placeholder="Contraseña (mínimo 6 caracteres)" autocomplete="current-password">
+    <button id="li">Ingresar</button><button class="s" id="su">Crear cuenta</button>`;
+  $('#li').onclick = () => auth('signInWithPassword');
+  $('#su').onclick = () => auth('signUp');
+}
+async function auth(fn) {
+  say('Un momento…');
+  const { data, error } = await sb.auth[fn]({ email: $('#em').value.trim(), password: $('#pw').value });
+  if (error) return say(error.message);
+  if (!data.session) return say('Te mandamos un mail: confirmá la cuenta y después ingresá.');
+  say(); load();
+}
+
+/* ---------- Comercio ---------- */
+async function load() {
+  const { data, error } = await sb.from('members').select('business_id,businesses(name)').limit(1);
+  if (error) return say(error.message);
+  if (!data.length) return bizView();
+  S.bid = data[0].business_id; S.bname = data[0].businesses.name;
+  const l = await sb.from('price_lists').select('id,name').eq('business_id', S.bid).order('name');
+  S.lists = l.data || [];
+  shell();
+}
+function bizView() {
+  $('#app').innerHTML = `<h1>Creá tu comercio</h1><input id="bn" placeholder="Nombre del comercio"><button id="bc">Crear comercio</button>`;
+  $('#bc').onclick = async () => {
+    const name = $('#bn').value.trim();
+    if (!name) return say('Escribí el nombre del comercio.');
+    const { error } = await sb.rpc('create_business', { p_name: name });
+    error ? say(error.message) : load();
+  };
+}
+function shell() {
+  const tabs = [['prod', 'Productos'], ['imp', 'Importar'], ['pre', 'Precios']];
+  $('#app').innerHTML = `<div class="r"><h1>${esc(S.bname)}</h1><button class="s" id="out">Salir</button></div>
+    <nav>${tabs.map(([k, n]) => `<button data-t="${k}" class="${S.tab == k ? '' : 's'}">${n}</button>`).join('')}</nav><div id="v"></div>`;
+  $('#out').onclick = async () => { await sb.auth.signOut(); say(); authView(); };
+  document.querySelectorAll('nav button').forEach(b => b.onclick = () => { S.tab = b.dataset.t; say(); shell(); });
+  ({ prod: prodView, imp: impView, pre: preView })[S.tab]();
+}
+
+/* ---------- Alta de productos (una o muchas filas) ---------- */
+async function addProducts(rows) {
+  const bid = S.bid;
+  const p = await sb.from('products').insert(rows.map(r => ({
+    business_id: bid, code: r.code || null, name: r.name, cost: r.cost || 0, units_per_pack: r.pack || 1
+  }))).select('id');
+  if (p.error) throw p.error;
+  const v = await sb.from('product_variants').insert(p.data.map(x => ({ business_id: bid, product_id: x.id }))).select('id');
+  if (v.error) throw v.error;
+  const pr = [];
+  rows.forEach((r, i) => {
+    for (const [l, x] of Object.entries(r.prices)) {
+      if (x !== '' && !isNaN(x)) pr.push({ business_id: bid, price_list_id: l, variant_id: v.data[i].id, price: +x });
+    }
+  });
+  if (pr.length) { const e = await sb.from('prices').insert(pr); if (e.error) throw e.error; }
+}
+
+/* ---------- Productos ---------- */
+async function prodView(q = '') {
+  $('#v').innerHTML = `<input id="q" type="search" placeholder="Buscar por nombre o código" value="${esc(q)}">
+    <details><summary>Nuevo producto</summary>
+      <input id="nc" placeholder="Código"><input id="nn" placeholder="Nombre">
+      <input id="nk" type="number" step="any" placeholder="Costo">
+      ${S.lists.map(l => `<input class="np" data-l="${l.id}" type="number" step="any" placeholder="Precio ${esc(l.name)}">`).join('')}
+      <button id="ns">Guardar producto</button></details>
+    <div id="pl" class="m">Cargando…</div>`;
+  $('#q').onchange = e => prodView(e.target.value.trim());
+  $('#ns').onclick = async () => {
+    const name = $('#nn').value.trim();
+    if (!name) return say('Falta el nombre del producto.');
+    try {
+      await addProducts([{
+        code: $('#nc').value.trim(), name, cost: +$('#nk').value || 0, pack: 1,
+        prices: Object.fromEntries([...document.querySelectorAll('.np')].map(i => [i.dataset.l, i.value === '' ? '' : +i.value]))
+      }]);
+      say('Producto guardado.'); prodView();
+    } catch (e) { say(e.code === '23505' ? 'Ya existe un producto con ese código.' : e.message); }
+  };
+  let r = sb.from('products').select('id,code,name,product_variants(prices(price,price_list_id,min_qty))')
+    .eq('business_id', S.bid).order('name').limit(100);
+  if (q) { const t = q.replace(/[,()%]/g, ' '); r = r.or(`name.ilike.%${t}%,code.ilike.%${t}%`); }
+  const { data, error } = await r;
+  if (error) return ($('#pl').textContent = error.message);
+  $('#pl').className = '';
+  $('#pl').innerHTML = data.length ? data.map(p => {
+    const pr = (p.product_variants[0]?.prices || []).filter(x => x.min_qty == 1);
+    const line = S.lists.map(l => { const x = pr.find(y => y.price_list_id == l.id); return x ? `${esc(l.name)} $${fmt(x.price)}` : ''; }).filter(Boolean).join(' | ');
+    return `<div class="c"><b>${esc(p.name)}</b><div class="m">${esc(p.code || 'sin código')}${line ? ' | ' + line : ''}</div></div>`;
+  }).join('') : '<p class="m">Todavía no hay productos. Cargá uno o importá un CSV.</p>';
+}
+
+/* ---------- Importar CSV ---------- */
+function csv(t) {
+  t = t.replace(/^\ufeff/, '');
+  const l1 = t.split('\n')[0];
+  const d = (l1.match(/;/g) || []).length > (l1.match(/,/g) || []).length ? ';' : ',';
+  const out = []; let row = [], f = '', q = false;
+  for (let i = 0; i < t.length; i++) {
+    const c = t[i];
+    if (q) { if (c == '"') { if (t[i + 1] == '"') { f += '"'; i++; } else q = false; } else f += c; }
+    else if (c == '"') q = true;
+    else if (c == d) { row.push(f); f = ''; }
+    else if (c == '\n' || c == '\r') { if (c == '\r' && t[i + 1] == '\n') i++; row.push(f); out.push(row); row = []; f = ''; }
+    else f += c;
+  }
+  if (f || row.length) { row.push(f); out.push(row); }
+  return out.filter(r => r.some(x => x.trim()));
+}
+function impView() {
+  const cols = ['codigo', 'nombre', 'costo', 'unidades_por_bulto', ...S.lists.map(l => 'precio_' + l.name.toLowerCase())];
+  $('#v').innerHTML = `<p class="m">Subí un archivo CSV (en Excel: Guardar como, CSV). Columnas:<br><b>${cols.join(', ')}</b><br>Solo "nombre" es obligatoria.</p>
+    <button class="s" id="tp">Descargar plantilla</button><input type="file" id="f" accept=".csv,text/csv"><div id="pv" class="m"></div>`;
+  $('#tp').onclick = () => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob(['\ufeff' + cols.join(',') + '\n'], { type: 'text/csv' }));
+    a.download = 'plantilla_productos.csv'; a.click();
+  };
+  $('#f').onchange = async e => {
+    const rows = csv(await e.target.files[0].text());
+    const h = rows.shift().map(x => x.trim().toLowerCase());
+    const ix = n => h.indexOf(n);
+    if (ix('nombre') < 0) return ($('#pv').textContent = 'Falta la columna "nombre".');
+    const items = rows.map(r => ({
+      code: (r[ix('codigo')] || '').trim(), name: (r[ix('nombre')] || '').trim(),
+      cost: num(r[ix('costo')]) || 0, pack: Math.max(1, parseInt(r[ix('unidades_por_bulto')]) || 1),
+      prices: Object.fromEntries(S.lists.map(l => [l.id, num(r[ix('precio_' + l.name.toLowerCase())])]))
+    })).filter(x => x.name);
+    let n = 0;
+    try {
+      for (let i = 0; i < items.length; i += 200) {
+        $('#pv').textContent = `Importando ${n} de ${items.length}…`;
+        const part = items.slice(i, i + 200);
+        await addProducts(part); n += part.length;
+      }
+      $('#pv').textContent = `Listo: ${n} productos importados.`;
+    } catch (err) {
+      $('#pv').textContent = `Se importaron ${n}. Error: ${err.code === '23505' ? 'hay un código repetido' : err.message}`;
+    }
+  };
+}
+
+/* ---------- Precios ---------- */
+function preView() {
+  $('#v').innerHTML = `<p class="m">Subí o bajá todos los precios de una lista de una sola vez. Ejemplo: 15 sube 15%, -5 baja 5%.</p>` +
+    S.lists.map(l => `<div class="c"><b>${esc(l.name)}</b>
+      <input type="number" step="any" placeholder="% de ajuste"><button data-l="${l.id}" data-n="${esc(l.name)}">Aplicar a toda la lista</button></div>`).join('');
+  document.querySelectorAll('#v button').forEach(b => b.onclick = async () => {
+    const pct = +b.previousElementSibling.value;
+    if (!pct) return say('Escribí un porcentaje distinto de 0.');
+    if (!confirm(`¿Ajustar ${pct}% todos los precios de ${b.dataset.n}?`)) return;
+    const { data, error } = await sb.rpc('adjust_prices', { p_price_list_id: b.dataset.l, p_pct: pct });
+    say(error ? error.message : `Se ajustaron ${data} precios.`);
+  });
+}
+
+init();
+</script>
+</body>
+</html>
