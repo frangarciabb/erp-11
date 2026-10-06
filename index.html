@@ -5,23 +5,25 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ERP Once</title>
 <style>
-:root{--bg:#f3f5f8;--fg:#0f1b33;--mut:#5d6b85;--card:#fff;--ac:#f2b705;--acf:#0f1b33;--bd:#d5dbe6}
-@media(prefers-color-scheme:dark){:root{--bg:#0d1424;--fg:#e8ecf5;--mut:#8f9bb5;--card:#16203a;--bd:#2a3556}}
+:root{--fg:#111;--mut:#777;--bd:#e6e6e6}
 *{box-sizing:border-box}
-body{margin:0;font:16px/1.4 "Avenir Next","Segoe UI",system-ui,sans-serif;background:var(--bg);color:var(--fg)}
-main{max-width:720px;margin:auto;padding:16px}
-h1{font-size:22px;margin:0 0 12px;letter-spacing:-.01em}
-input,button{font:inherit;padding:11px 12px;border:1px solid var(--bd);border-radius:6px;background:var(--card);color:var(--fg);width:100%;margin:4px 0}
-button{background:var(--ac);color:var(--acf);border:0;cursor:pointer;font-weight:700}
-button.s{background:var(--card);color:var(--fg);border:1px solid var(--bd)}
-:focus-visible{outline:2px solid var(--ac);outline-offset:2px}
-nav{display:flex;gap:6px;margin-bottom:12px}
-nav button{margin:0}
-.c{background:var(--card);border:1px solid var(--bd);border-radius:6px;padding:10px 12px;margin:8px 0}
+body{margin:0;font:16px/1.45 -apple-system,"Helvetica Neue",Arial,sans-serif;background:#fff;color:var(--fg)}
+main{max-width:640px;margin:auto;padding:20px 16px 60px}
+h1{font-size:20px;font-weight:600;margin:0}
+input,select,button{font:inherit;padding:11px 12px;border:1px solid var(--bd);border-radius:8px;background:#fff;color:var(--fg);width:100%;margin:4px 0}
+button{background:var(--fg);color:#fff;border:0;cursor:pointer;font-weight:500}
+button.s{background:#fff;color:var(--fg);border:1px solid var(--bd)}
+:focus-visible{outline:2px solid var(--fg);outline-offset:2px}
+nav{display:flex;gap:18px;border-bottom:1px solid var(--bd);margin:14px 0;overflow-x:auto}
+nav button{width:auto;background:none;color:var(--mut);border:0;border-bottom:2px solid transparent;border-radius:0;padding:8px 0;margin:0 0 -1px;white-space:nowrap}
+nav button.on{color:var(--fg);border-color:var(--fg);font-weight:600}
+.c{border-bottom:1px solid var(--bd);padding:12px 0}
 .m{color:var(--mut);font-size:14px}
+.t{font-weight:600}
 .r{display:flex;justify-content:space-between;align-items:center;gap:8px}
 .r button{width:auto}
-summary{cursor:pointer;font-weight:700;padding:8px 0}
+.g{display:flex;gap:8px}.g>*{flex:1}
+summary{cursor:pointer}
 #msg{font-size:14px;color:var(--mut);min-height:20px;margin-top:8px}
 </style>
 </head>
@@ -73,6 +75,8 @@ async function load() {
   S.bid = data[0].business_id; S.bname = data[0].businesses.name;
   const l = await sb.from('price_lists').select('id,name').eq('business_id', S.bid).order('name');
   S.lists = l.data || [];
+  const w = await sb.from('warehouses').select('id').eq('business_id', S.bid).limit(1);
+  S.wh = w.data?.[0]?.id;
   shell();
 }
 function bizView() {
@@ -85,17 +89,17 @@ function bizView() {
   };
 }
 function shell() {
-  const tabs = [['prod', 'Productos'], ['imp', 'Importar'], ['pre', 'Precios']];
+  const tabs = [['prod', 'Productos'], ['stock', 'Stock'], ['quo', 'Presupuestos'], ['imp', 'Importar'], ['pre', 'Precios']];
   $('#app').innerHTML = `<div class="r"><h1>${esc(S.bname)}</h1><button class="s" id="out">Salir</button></div>
-    <nav>${tabs.map(([k, n]) => `<button data-t="${k}" class="${S.tab == k ? '' : 's'}">${n}</button>`).join('')}</nav><div id="v"></div>`;
+    <nav>${tabs.map(([k, n]) => `<button data-t="${k}" class="${S.tab == k ? 'on' : ''}">${n}</button>`).join('')}</nav><div id="v"></div>`;
   $('#out').onclick = async () => { await sb.auth.signOut(); say(); authView(); };
   document.querySelectorAll('nav button').forEach(b => b.onclick = () => { S.tab = b.dataset.t; say(); shell(); });
-  ({ prod: prodView, imp: impView, pre: preView })[S.tab]();
+  ({ prod: prodView, stock: stockView, quo: quoView, imp: impView, pre: preView })[S.tab]();
 }
 
 /* ---------- Alta de productos (una o muchas filas) ---------- */
 async function addProducts(rows) {
-  const bid = S.bid;
+  const bid = S.bid; S.cat = null;
   const p = await sb.from('products').insert(rows.map(r => ({
     business_id: bid, code: r.code || null, name: r.name, cost: r.cost || 0, units_per_pack: r.pack || 1
   }))).select('id');
@@ -109,12 +113,16 @@ async function addProducts(rows) {
     }
   });
   if (pr.length) { const e = await sb.from('prices').insert(pr); if (e.error) throw e.error; }
+  const st = rows.map((r, i) => ({ r, i })).filter(x => x.r.stock > 0).map(x => ({
+    business_id: bid, warehouse_id: S.wh, variant_id: v.data[x.i].id, qty: x.r.stock, type: 'ingreso', note: 'Stock inicial'
+  }));
+  if (st.length) { const e = await sb.from('stock_movements').insert(st); if (e.error) throw e.error; }
 }
 
 /* ---------- Productos ---------- */
 async function prodView(q = '') {
   $('#v').innerHTML = `<input id="q" type="search" placeholder="Buscar por nombre o código" value="${esc(q)}">
-    <details><summary>Nuevo producto</summary>
+    <details class="c"><summary class="t">+ Nuevo producto</summary>
       <input id="nc" placeholder="Código"><input id="nn" placeholder="Nombre">
       <input id="nk" type="number" step="any" placeholder="Costo">
       ${S.lists.map(l => `<input class="np" data-l="${l.id}" type="number" step="any" placeholder="Precio ${esc(l.name)}">`).join('')}
@@ -132,17 +140,32 @@ async function prodView(q = '') {
       say('Producto guardado.'); prodView();
     } catch (e) { say(e.code === '23505' ? 'Ya existe un producto con ese código.' : e.message); }
   };
-  let r = sb.from('products').select('id,code,name,product_variants(prices(price,price_list_id,min_qty))')
+  let r = sb.from('products').select('id,code,name,cost,product_variants(id,prices(price,price_list_id,min_qty))')
     .eq('business_id', S.bid).order('name').limit(100);
   if (q) { const t = q.replace(/[,()%]/g, ' '); r = r.or(`name.ilike.%${t}%,code.ilike.%${t}%`); }
   const { data, error } = await r;
   if (error) return ($('#pl').textContent = error.message);
   $('#pl').className = '';
   $('#pl').innerHTML = data.length ? data.map(p => {
-    const pr = (p.product_variants[0]?.prices || []).filter(x => x.min_qty == 1);
-    const line = S.lists.map(l => { const x = pr.find(y => y.price_list_id == l.id); return x ? `${esc(l.name)} $${fmt(x.price)}` : ''; }).filter(Boolean).join(' | ');
-    return `<div class="c"><b>${esc(p.name)}</b><div class="m">${esc(p.code || 'sin código')}${line ? ' | ' + line : ''}</div></div>`;
+    const v = p.product_variants[0] || {}, pr = (v.prices || []).filter(x => x.min_qty == 1);
+    const at = id => pr.find(y => y.price_list_id == id);
+    const line = S.lists.map(l => at(l.id) ? `${esc(l.name)} $${fmt(at(l.id).price)}` : '').filter(Boolean).join('  |  ');
+    return `<details class="c" data-p="${p.id}" data-v="${v.id}"><summary><div class="r"><span class="t">${esc(p.name)}</span><span class="m">${esc(p.code || '')}</span></div><div class="m">${line}</div></summary>
+      <input class="en" value="${esc(p.name)}"><label class="m">Costo</label><input class="ek" type="number" step="any" value="${p.cost}">
+      ${S.lists.map(l => `<label class="m">Precio ${esc(l.name)}</label><input class="ep" data-l="${l.id}" type="number" step="any" value="${at(l.id) ? at(l.id).price : ''}">`).join('')}
+      <button class="sv">Guardar cambios</button></details>`;
   }).join('') : '<p class="m">Todavía no hay productos. Cargá uno o importá un CSV.</p>';
+  document.querySelectorAll('.sv').forEach(b => b.onclick = async () => {
+    const d = b.closest('details');
+    const e1 = await sb.from('products').update({ name: d.querySelector('.en').value.trim(), cost: +d.querySelector('.ek').value || 0 }).eq('id', d.dataset.p);
+    const pr = [...d.querySelectorAll('.ep')].filter(i => i.value !== '').map(i => ({
+      business_id: S.bid, price_list_id: i.dataset.l, variant_id: d.dataset.v, min_qty: 1, price: +i.value
+    }));
+    const e2 = pr.length ? await sb.from('prices').upsert(pr, { onConflict: 'price_list_id,variant_id,min_qty' }) : {};
+    const er = e1.error || e2.error;
+    S.cat = null; say(er ? er.message : 'Cambios guardados.');
+    if (!er) prodView(q);
+  });
 }
 
 /* ---------- Importar CSV ---------- */
@@ -163,7 +186,7 @@ function csv(t) {
   return out.filter(r => r.some(x => x.trim()));
 }
 function impView() {
-  const cols = ['codigo', 'nombre', 'costo', 'unidades_por_bulto', ...S.lists.map(l => 'precio_' + l.name.toLowerCase())];
+  const cols = ['codigo', 'nombre', 'costo', 'unidades_por_bulto', 'stock', ...S.lists.map(l => 'precio_' + l.name.toLowerCase())];
   $('#v').innerHTML = `<p class="m">Subí un archivo CSV (en Excel: Guardar como, CSV). Columnas:<br><b>${cols.join(', ')}</b><br>Solo "nombre" es obligatoria.</p>
     <button class="s" id="tp">Descargar plantilla</button><input type="file" id="f" accept=".csv,text/csv"><div id="pv" class="m"></div>`;
   $('#tp').onclick = () => {
@@ -178,7 +201,7 @@ function impView() {
     if (ix('nombre') < 0) return ($('#pv').textContent = 'Falta la columna "nombre".');
     const items = rows.map(r => ({
       code: (r[ix('codigo')] || '').trim(), name: (r[ix('nombre')] || '').trim(),
-      cost: num(r[ix('costo')]) || 0, pack: Math.max(1, parseInt(r[ix('unidades_por_bulto')]) || 1),
+      cost: num(r[ix('costo')]) || 0, stock: num(r[ix('stock')]) || 0, pack: Math.max(1, parseInt(r[ix('unidades_por_bulto')]) || 1),
       prices: Object.fromEntries(S.lists.map(l => [l.id, num(r[ix('precio_' + l.name.toLowerCase())])]))
     })).filter(x => x.name);
     let n = 0;
@@ -197,16 +220,142 @@ function impView() {
 
 /* ---------- Precios ---------- */
 function preView() {
-  $('#v').innerHTML = `<p class="m">Subí o bajá todos los precios de una lista de una sola vez. Ejemplo: 15 sube 15%, -5 baja 5%.</p>` +
+  $('#v').innerHTML = `<p class="m">Subí o bajá todos los precios de una lista a la vez. Escribí el porcentaje y elegí si sube o baja.</p>` +
     S.lists.map(l => `<div class="c"><b>${esc(l.name)}</b>
-      <input type="number" step="any" placeholder="% de ajuste"><button data-l="${l.id}" data-n="${esc(l.name)}">Aplicar a toda la lista</button></div>`).join('');
+      <input type="number" step="any" min="0" id="a${l.id}" placeholder="% de ajuste (ej: 10)">
+      <div class="g"><button data-l="${l.id}" data-n="${esc(l.name)}" data-s="1">Subir</button><button class="s" data-l="${l.id}" data-n="${esc(l.name)}" data-s="-1">Bajar</button></div></div>`).join('');
   document.querySelectorAll('#v button').forEach(b => b.onclick = async () => {
-    const pct = +b.previousElementSibling.value;
-    if (!pct) return say('Escribí un porcentaje distinto de 0.');
-    if (!confirm(`¿Ajustar ${pct}% todos los precios de ${b.dataset.n}?`)) return;
+    const x = Math.abs(+$('#a' + b.dataset.l).value);
+    if (!x) return say('Escribí un porcentaje mayor a 0.');
+    const pct = x * b.dataset.s;
+    if (!confirm(`¿${pct > 0 ? 'Subir' : 'Bajar'} ${x}% todos los precios de ${b.dataset.n}?`)) return;
     const { data, error } = await sb.rpc('adjust_prices', { p_price_list_id: b.dataset.l, p_pct: pct });
+    S.cat = null;
     say(error ? error.message : `Se ajustaron ${data} precios.`);
   });
+}
+
+/* ---------- Catálogo compartido (stock y presupuestos) ---------- */
+async function catalog() {
+  const { data, error } = await sb.from('product_variants').select('id,products(name,code),prices(price,price_list_id,min_qty)')
+    .eq('business_id', S.bid).limit(2000);
+  if (error) { say(error.message); return []; }
+  return (S.cat = data.map(v => ({ id: v.id, name: v.products.name, code: v.products.code || '', prices: v.prices }))
+    .sort((a, b) => a.name.localeCompare(b.name)));
+}
+const priceOf = (v, list, q) => {
+  const x = v.prices.filter(p => p.price_list_id == list && p.min_qty <= q).sort((a, b) => b.min_qty - a.min_qty)[0];
+  return x ? +x.price : 0;
+};
+const match = (v, q) => (v.name + ' ' + v.code).toLowerCase().includes(q.toLowerCase());
+
+/* ---------- Stock ---------- */
+async function stockView(q = '') {
+  $('#v').innerHTML = `<input id="q" type="search" placeholder="Buscar producto" value="${esc(q)}"><div id="sl" class="m">Cargando…</div>`;
+  $('#q').onchange = e => stockView(e.target.value.trim());
+  const [cat, st] = await Promise.all([catalog(), sb.from('stock_levels').select('variant_id,qty').eq('business_id', S.bid)]);
+  const lv = {};
+  (st.data || []).forEach(x => { lv[x.variant_id] = (lv[x.variant_id] || 0) + +x.qty; });
+  $('#sl').className = '';
+  $('#sl').innerHTML = cat.filter(v => match(v, q)).slice(0, 100).map(v => {
+    const n = lv[v.id] || 0;
+    return `<details class="c" data-v="${v.id}" data-n="${n}"><summary><div class="r"><span class="t">${esc(v.name)}</span><span class="t"${n <= 0 ? ' style="color:#c0392b"' : ''}>${n}</span></div><div class="m">${esc(v.code)}</div></summary>
+      <input type="number" step="any" min="0" placeholder="Cantidad">
+      <div class="g"><button data-k="ingreso">Ingreso</button><button class="s" data-k="egreso">Egreso</button><button class="s" data-k="ajuste">Fijar total</button></div></details>`;
+  }).join('') || '<p class="m">No hay productos.</p>';
+  document.querySelectorAll('#sl .g button').forEach(b => b.onclick = async () => {
+    const d = b.closest('details'), inp = d.querySelector('input'), x = +inp.value, k = b.dataset.k;
+    if (inp.value === '' || x < 0) return say('Escribí una cantidad.');
+    const qty = k == 'ingreso' ? x : k == 'egreso' ? -x : x - +d.dataset.n;
+    if (!qty) return say('No hay cambios.');
+    const { error } = await sb.from('stock_movements').insert({ business_id: S.bid, warehouse_id: S.wh, variant_id: d.dataset.v, qty, type: k });
+    if (error) return say(error.message);
+    say('Stock actualizado.'); stockView(q);
+  });
+}
+
+/* ---------- Presupuestos ---------- */
+async function quoView() {
+  $('#v').innerHTML = `<button id="nq">Nuevo presupuesto</button><div id="ql" class="m">Cargando…</div>`;
+  $('#nq').onclick = async () => {
+    const d = S.lists.find(l => l.name == 'Minorista') || S.lists[0];
+    const { data, error } = await sb.from('quotes').insert({ business_id: S.bid, price_list_id: d.id }).select('id').single();
+    error ? say(error.message) : quoEdit(data.id);
+  };
+  const { data, error } = await sb.from('quotes').select('id,number,status,total,customers(name)')
+    .eq('business_id', S.bid).order('number', { ascending: false }).limit(50);
+  if (error) return say(error.message);
+  $('#ql').className = '';
+  $('#ql').innerHTML = data.length ? data.map(x => `<div class="c" data-q="${x.id}" style="cursor:pointer"><div class="r"><span class="t">#${x.number} ${esc(x.customers?.name || 'Sin cliente')}</span><span class="t">$${fmt(x.total)}</span></div><div class="m">${x.status}</div></div>`).join('')
+    : '<p class="m">Todavía no hay presupuestos.</p>';
+  document.querySelectorAll('[data-q]').forEach(c => c.onclick = () => quoEdit(c.dataset.q));
+}
+
+async function quoEdit(id, q = '') {
+  const [qr, ir, cu] = await Promise.all([
+    sb.from('quotes').select('*').eq('id', id).single(),
+    sb.from('quote_items').select('*').eq('quote_id', id).order('description'),
+    sb.from('customers').select('id,name,phone').eq('business_id', S.bid).order('name')
+  ]);
+  if (qr.error) return say(qr.error.message);
+  if (!S.cat) await catalog();
+  const Q = qr.data, items = ir.data || [], cl = cu.data || [], c = cl.find(x => x.id == Q.customer_id);
+  const ro = Q.status == 'convertido', dis = ro ? ' disabled' : '';
+  const hits = q ? S.cat.filter(v => match(v, q)).slice(0, 8) : [];
+  $('#v').innerHTML = `<div class="r"><button class="s" id="bk">Volver</button><span class="t">Presupuesto #${Q.number} (${Q.status})</span></div>
+    <select id="pl2"${dis}>${S.lists.map(l => `<option value="${l.id}"${l.id == Q.price_list_id ? ' selected' : ''}>Lista ${esc(l.name)}</option>`).join('')}</select>
+    <select id="cu"${dis}><option value="">Sin cliente</option>${cl.map(x => `<option value="${x.id}"${x.id == Q.customer_id ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}<option value="+">+ Nuevo cliente</option></select>
+    ${ro ? '' : `<input id="sq" type="search" placeholder="Agregar producto: escribí para buscar" value="${esc(q)}">`}
+    ${hits.map(v => `<button class="s" data-a="${v.id}">${esc(v.name)} ($${fmt(priceOf(v, Q.price_list_id, 1))})</button>`).join('')}
+    <div id="it">${items.map(i => `<div class="c" data-i="${i.id}"><div class="r"><span>${esc(i.description)}</span><button class="s x"${dis}>Quitar</button></div>
+      <div class="g"><input class="iq" type="number" step="any" value="${i.qty}"${dis}><input class="ip" type="number" step="any" value="${i.unit_price}"${dis}></div>
+      <div class="m">Cantidad, precio unitario | Subtotal $${fmt(i.line_total)}</div></div>`).join('') || '<p class="m">Buscá un producto para agregarlo.</p>'}</div>
+    <label class="m">Descuento general (%)</label><input id="dc" type="number" step="any" min="0" max="100" value="${Q.discount_pct}"${dis}>
+    <div class="r"><span class="t">Total</span><span class="t" style="font-size:22px">$${fmt(Q.total)}</span></div>
+    ${ro ? '' : `<div class="g"><button id="wa">Enviar por WhatsApp</button><button class="s" id="cv">Convertir en venta</button></div>`}`;
+  const upd = async o => { const { error } = await sb.from('quotes').update(o).eq('id', id); error ? say(error.message) : quoEdit(id, q); };
+  $('#bk').onclick = quoView;
+  $('#pl2').onchange = e => upd({ price_list_id: e.target.value });
+  $('#dc').onchange = e => upd({ discount_pct: Math.min(100, Math.max(0, +e.target.value || 0)) });
+  $('#cu').onchange = async e => {
+    let v = e.target.value || null;
+    if (v == '+') {
+      const n = prompt('Nombre del cliente');
+      if (!n) return quoEdit(id, q);
+      const ph = prompt('WhatsApp (opcional, con código de área)') || null;
+      const r = await sb.from('customers').insert({ business_id: S.bid, name: n.trim(), phone: ph }).select('id').single();
+      if (r.error) return say(r.error.message);
+      v = r.data.id;
+    }
+    upd({ customer_id: v });
+  };
+  if (ro) return;
+  $('#sq').onchange = e => quoEdit(id, e.target.value.trim());
+  document.querySelectorAll('[data-a]').forEach(b => b.onclick = async () => {
+    const v = S.cat.find(x => x.id == b.dataset.a);
+    const { error } = await sb.from('quote_items').insert({ business_id: S.bid, quote_id: id, variant_id: v.id, description: v.name, qty: 1, unit_price: priceOf(v, Q.price_list_id, 1) });
+    error ? say(error.message) : quoEdit(id);
+  });
+  document.querySelectorAll('#it [data-i]').forEach(r => {
+    const iid = r.dataset.i;
+    const sv = async o => { const { error } = await sb.from('quote_items').update(o).eq('id', iid); error ? say(error.message) : quoEdit(id, q); };
+    r.querySelector('.iq').onchange = e => +e.target.value > 0 ? sv({ qty: +e.target.value }) : quoEdit(id, q);
+    r.querySelector('.ip').onchange = e => sv({ unit_price: Math.max(0, +e.target.value || 0) });
+    r.querySelector('.x').onclick = async () => { await sb.from('quote_items').delete().eq('id', iid); quoEdit(id, q); };
+  });
+  $('#wa').onclick = async () => {
+    const t = `Presupuesto #${Q.number} - ${S.bname}\n` + items.map(i => `${i.qty} x ${i.description} - $${fmt(i.line_total)}`).join('\n')
+      + (+Q.discount_pct ? `\nDescuento ${Q.discount_pct}%` : '') + `\nTOTAL: $${fmt(Q.total)}`;
+    window.open(`https://wa.me/${(c?.phone || '').replace(/\D/g, '')}?text=${encodeURIComponent(t)}`);
+    if (Q.status == 'borrador') await sb.from('quotes').update({ status: 'enviado' }).eq('id', id);
+  };
+  $('#cv').onclick = async () => {
+    if (!items.length) return say('Agregá al menos un producto.');
+    if (!confirm('¿Convertir en venta y descontar el stock?')) return;
+    const { error } = await sb.rpc('convert_quote_to_sale', { p_quote_id: id, p_warehouse_id: S.wh });
+    if (error) return say(error.message);
+    say('Venta registrada y stock descontado.'); quoEdit(id);
+  };
 }
 
 init();
