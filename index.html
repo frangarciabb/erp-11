@@ -50,6 +50,8 @@ const S = { bid: null, bname: '', lists: [], tab: 'prod' };
 const say = t => { $('#msg').textContent = t || ''; };
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const fmt = n => Number(n).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const mon = c => c == 'USD' ? 'US$ ' : '$';
+const MN = { ARS: 'Pesos argentinos (ARS)', USD: 'Dólares estadounidenses (USD)' };
 const num = s => {
   s = String(s ?? '').trim().replace(/[$\s]/g, '');
   if (s.includes(',')) s = s.replace(/\./g, '').replace(',', '.');
@@ -83,7 +85,7 @@ async function load() {
   if (error) return say(error.message);
   if (!data.length) return bizView();
   S.bid = data[0].business_id; S.bname = data[0].businesses.name;
-  const l = await sb.from('price_lists').select('id,name').eq('business_id', S.bid).order('name');
+  const l = await sb.from('price_lists').select('id,name,currency').eq('business_id', S.bid).order('name');
   S.lists = l.data || [];
   const w = await sb.from('warehouses').select('id').eq('business_id', S.bid).limit(1);
   S.wh = w.data?.[0]?.id;
@@ -111,7 +113,7 @@ function shell() {
 async function addProducts(rows) {
   const bid = S.bid; S.cat = null;
   const p = await sb.from('products').insert(rows.map(r => ({
-    business_id: bid, code: r.code || null, name: r.name, cost: r.cost || 0, units_per_pack: r.pack || 1
+    business_id: bid, code: r.code || null, name: r.name, cost: r.cost || 0, cost_currency: r.cc || 'ARS', units_per_pack: r.pack || 1
   }))).select('id');
   if (p.error) throw p.error;
   const v = await sb.from('product_variants').insert(p.data.map(x => ({ business_id: bid, product_id: x.id }))).select('id');
@@ -134,8 +136,8 @@ async function prodView(q = '') {
   $('#v').innerHTML = `<input id="q" type="search" placeholder="Buscar por nombre o código" value="${esc(q)}">
     <details class="c"><summary class="t">+ Nuevo producto</summary>
       <input id="nc" placeholder="Código"><input id="nn" placeholder="Nombre">
-      <input id="nk" type="number" step="any" placeholder="Costo">
-      ${S.lists.map(l => `<input class="np" data-l="${l.id}" type="number" step="any" placeholder="Precio ${esc(l.name)}">`).join('')}
+      <input id="nk" type="number" step="any" placeholder="Costo"><select id="nm"><option value="ARS">Costo en pesos</option><option value="USD">Costo en dólares</option></select>
+      ${S.lists.map(l => `<input class="np" data-l="${l.id}" type="number" step="any" placeholder="Precio ${esc(l.name)} (${l.currency})">`).join('')}
       <button id="ns">Guardar producto</button></details>
     <div id="pl" class="m">Cargando…</div>`;
   $('#q').onchange = e => prodView(e.target.value.trim());
@@ -144,13 +146,13 @@ async function prodView(q = '') {
     if (!name) return say('Falta el nombre del producto.');
     try {
       await addProducts([{
-        code: $('#nc').value.trim(), name, cost: +$('#nk').value || 0, pack: 1,
+        code: $('#nc').value.trim(), name, cost: +$('#nk').value || 0, cc: $('#nm').value, pack: 1,
         prices: Object.fromEntries([...document.querySelectorAll('.np')].map(i => [i.dataset.l, i.value === '' ? '' : +i.value]))
       }]);
       say('Producto guardado.'); prodView();
     } catch (e) { say(e.code === '23505' ? 'Ya existe un producto con ese código.' : e.message); }
   };
-  let r = sb.from('products').select('id,code,name,cost,product_variants(id,prices(price,price_list_id,min_qty))')
+  let r = sb.from('products').select('id,code,name,cost,cost_currency,product_variants(id,prices(price,price_list_id,min_qty))')
     .eq('business_id', S.bid).order('name').limit(100);
   if (q) { const t = q.replace(/[,()%]/g, ' '); r = r.or(`name.ilike.%${t}%,code.ilike.%${t}%`); }
   const { data, error } = await r;
@@ -159,15 +161,15 @@ async function prodView(q = '') {
   $('#pl').innerHTML = data.length ? data.map(p => {
     const v = p.product_variants[0] || {}, pr = (v.prices || []).filter(x => x.min_qty == 1);
     const at = id => pr.find(y => y.price_list_id == id);
-    const line = S.lists.map(l => at(l.id) ? `${esc(l.name)} $${fmt(at(l.id).price)}` : '').filter(Boolean).join('  |  ');
+    const line = S.lists.map(l => at(l.id) ? `${esc(l.name)} ${mon(l.currency)}${fmt(at(l.id).price)}` : '').filter(Boolean).join('  |  ');
     return `<details class="c" data-p="${p.id}" data-v="${v.id}"><summary><div class="r"><span class="t">${esc(p.name)}</span><span class="m">${esc(p.code || '')}</span></div><div class="m">${line}</div></summary>
-      <input class="en" value="${esc(p.name)}"><label class="m">Costo</label><input class="ek" type="number" step="any" value="${p.cost}">
-      ${S.lists.map(l => `<label class="m">Precio ${esc(l.name)}</label><input class="ep" data-l="${l.id}" type="number" step="any" value="${at(l.id) ? at(l.id).price : ''}">`).join('')}
+      <input class="en" value="${esc(p.name)}"><label class="m">Costo</label><input class="ek" type="number" step="any" value="${p.cost}"><select class="ec"><option value="ARS"${p.cost_currency == 'ARS' ? ' selected' : ''}>Costo en pesos</option><option value="USD"${p.cost_currency == 'USD' ? ' selected' : ''}>Costo en dólares</option></select>
+      ${S.lists.map(l => `<label class="m">Precio ${esc(l.name)} (${l.currency})</label><input class="ep" data-l="${l.id}" type="number" step="any" value="${at(l.id) ? at(l.id).price : ''}">`).join('')}
       <button class="sv">Guardar cambios</button></details>`;
   }).join('') : '<p class="m">Todavía no hay productos. Cargá uno o importá un CSV.</p>';
   document.querySelectorAll('.sv').forEach(b => b.onclick = async () => {
     const d = b.closest('details');
-    const e1 = await sb.from('products').update({ name: d.querySelector('.en').value.trim(), cost: +d.querySelector('.ek').value || 0 }).eq('id', d.dataset.p);
+    const e1 = await sb.from('products').update({ name: d.querySelector('.en').value.trim(), cost: +d.querySelector('.ek').value || 0, cost_currency: d.querySelector('.ec').value }).eq('id', d.dataset.p);
     const pr = [...d.querySelectorAll('.ep')].filter(i => i.value !== '').map(i => ({
       business_id: S.bid, price_list_id: i.dataset.l, variant_id: d.dataset.v, min_qty: 1, price: +i.value
     }));
@@ -197,7 +199,7 @@ function csv(t) {
 }
 function impView() {
   const cols = ['codigo', 'nombre', 'costo', 'unidades_por_bulto', 'stock', ...S.lists.map(l => 'precio_' + l.name.toLowerCase())];
-  $('#v').innerHTML = `<p class="m">Subí un archivo CSV (en Excel: Guardar como, CSV). Columnas:<br><b>${cols.join(', ')}</b><br>Solo "nombre" es obligatoria.</p>
+  $('#v').innerHTML = `<p class="m">Subí un archivo CSV (en Excel: Guardar como, CSV). Columnas:<br><b>${cols.join(', ')}</b><br>Solo "nombre" es obligatoria. Los precios van en la moneda de cada lista.</p>
     <button class="s" id="tp">Descargar plantilla</button><input type="file" id="f" accept=".csv,text/csv"><div id="pv" class="m"></div>`;
   $('#tp').onclick = () => {
     const a = document.createElement('a');
@@ -231,10 +233,10 @@ function impView() {
 /* ---------- Precios ---------- */
 function preView() {
   $('#v').innerHTML = `<div class="c"><b>Nueva lista de precios</b><p class="m">Por ejemplo: Precio Once, Precio Flores.</p>
-      <input id="ln" placeholder="Nombre de la lista"><select id="ls"><option value="">Empezar vacía</option>${S.lists.map(l => `<option value="${l.id}">Copiar precios de ${esc(l.name)}</option>`).join('')}</select>
+      <input id="ln" placeholder="Nombre de la lista"><select id="lm"><option value="ARS">Moneda: pesos (ARS)</option><option value="USD">Moneda: dólares (USD)</option></select><select id="ls"><option value="">Empezar vacía</option>${S.lists.map(l => `<option value="${l.id}">Copiar precios de ${esc(l.name)}</option>`).join('')}</select>
       <button id="nl">Crear lista</button></div>
     <p class="m">Subí o bajá todos los precios de una lista a la vez. Escribí el porcentaje y elegí si sube o baja.</p>` +
-    S.lists.map(l => `<div class="c"><b>${esc(l.name)}</b>
+    S.lists.map(l => `<div class="c"><b>${esc(l.name)}</b> <span class="m">${l.currency}</span>
       <input type="number" step="any" min="0" id="a${l.id}" placeholder="% de ajuste (ej: 10)">
       <div class="g"><button data-l="${l.id}" data-n="${esc(l.name)}" data-s="1">Subir</button><button class="s" data-l="${l.id}" data-n="${esc(l.name)}" data-s="-1">Bajar</button></div></div>`).join('');
   $('#nl').onclick = crearLista;
@@ -271,18 +273,27 @@ const priceOf = (v, list, q) => {
 const match = (v, q) => (v.name + ' ' + v.code).toLowerCase().includes(q.toLowerCase());
 
 async function crearLista() {
-  const name = $('#ln').value.trim(), src = $('#ls').value;
+  const name = $('#ln').value.trim(), src = $('#ls').value, cur = $('#lm').value;
   if (!name) return say('Escribí el nombre de la lista.');
-  const { data, error } = await sb.from('price_lists').insert({ business_id: S.bid, name }).select('id').single();
+  const sl = S.lists.find(l => l.id == src);
+  let k = 1;
+  if (sl && sl.currency != cur) {
+    const r = num(prompt(`Cotización del dólar (pesos por 1 USD) para convertir los precios de ${sl.name}:`));
+    if (!(r > 0)) return say('Cotización inválida. No se creó la lista.');
+    k = cur == 'USD' ? 1 / r : r;
+  }
+  const { data, error } = await sb.from('price_lists').insert({ business_id: S.bid, name, currency: cur }).select('id').single();
   if (error) return say(error.code === '23505' ? 'Ya existe una lista con ese nombre.' : error.message);
   if (src) {
     const rows = await pg(() => sb.from('prices').select('variant_id,min_qty,price').eq('price_list_id', src).order('id'));
     for (let i = 0; i < rows.length; i += 500) {
-      const e = await sb.from('prices').insert(rows.slice(i, i + 500).map(x => ({ ...x, business_id: S.bid, price_list_id: data.id })));
+      const e = await sb.from('prices').insert(rows.slice(i, i + 500).map(x => ({
+        variant_id: x.variant_id, min_qty: x.min_qty, price: Math.round(x.price * k * 100) / 100, business_id: S.bid, price_list_id: data.id
+      })));
       if (e.error) return say(e.error.message);
     }
   }
-  const l = await sb.from('price_lists').select('id,name').eq('business_id', S.bid).order('name');
+  const l = await sb.from('price_lists').select('id,name,currency').eq('business_id', S.bid).order('name');
   S.lists = l.data || []; S.cat = null;
   say(`Lista "${name}" creada.`); preView();
 }
@@ -295,14 +306,15 @@ async function ventasView(d = new Date().toLocaleDateString('sv-SE')) {
       <a class="b" href="https://www.arca.gob.ar" target="_blank" rel="noopener">Portal de ARCA</a></div>`;
   $('#vd').onchange = e => e.target.value && ventasView(e.target.value);
   const a = new Date(d + 'T00:00:00'), z = new Date(a.getTime() + 864e5);
-  const { data, error } = await sb.from('sales').select('id,total,created_at,customers(name),sale_items(description,qty)')
+  const { data, error } = await sb.from('sales').select('id,total,currency,created_at,customers(name),sale_items(description,qty)')
     .eq('business_id', S.bid).gte('created_at', a.toISOString()).lt('created_at', z.toISOString()).order('created_at', { ascending: false });
   if (error) return ($('#vs').textContent = error.message);
-  const tot = data.reduce((t, x) => t + +x.total, 0), pr = {};
-  data.forEach(x => x.sale_items.forEach(i => { pr[i.description] = (pr[i.description] || 0) + +i.qty; }));
+  const tot = {}, pr = {};
+  data.forEach(x => { tot[x.currency] = (tot[x.currency] || 0) + +x.total; x.sale_items.forEach(i => { pr[i.description] = (pr[i.description] || 0) + +i.qty; }); });
+  const tt = Object.entries(tot).map(([c, v]) => `${mon(c)}${fmt(v)}`).join('  |  ') || `${mon('ARS')}${fmt(0)}`;
   $('#vs').className = '';
-  $('#vs').innerHTML = `<div class="c"><span class="m">Total del día (${data.length} ${data.length == 1 ? 'venta' : 'ventas'})</span><div class="t" style="font-size:28px">$${fmt(tot)}</div></div>`
-    + data.map(x => `<div class="r c"><span>${new Date(x.created_at).toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' })} ${esc(x.customers?.name || 'Cliente ocasional')}</span><span class="t">$${fmt(x.total)}</span></div>`).join('')
+  $('#vs').innerHTML = `<div class="c"><span class="m">Total del día (${data.length} ${data.length == 1 ? 'venta' : 'ventas'})</span><div class="t" style="font-size:28px">${tt}</div></div>`
+    + data.map(x => `<div class="r c"><span>${new Date(x.created_at).toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' })} ${esc(x.customers?.name || 'Cliente ocasional')}</span><span class="t">${mon(x.currency)}${fmt(x.total)}</span></div>`).join('')
     + (data.length ? `<p class="t">Productos vendidos</p>` + Object.entries(pr).sort((u, w) => w[1] - u[1]).map(([n, q]) => `<div class="r c"><span>${esc(n)}</span><span class="t">${q}</span></div>`).join('')
       : '<p class="m">No hay ventas en esta fecha.</p>');
 }
@@ -337,14 +349,14 @@ async function quoView() {
   $('#v').innerHTML = `<button id="nq">Nuevo presupuesto</button><div id="ql" class="m">Cargando…</div>`;
   $('#nq').onclick = async () => {
     const d = S.lists.find(l => l.name == 'Minorista') || S.lists[0];
-    const { data, error } = await sb.from('quotes').insert({ business_id: S.bid, price_list_id: d.id }).select('id').single();
+    const { data, error } = await sb.from('quotes').insert({ business_id: S.bid, price_list_id: d.id, currency: d.currency }).select('id').single();
     error ? say(error.message) : quoEdit(data.id);
   };
-  const { data, error } = await sb.from('quotes').select('id,number,status,total,customers(name)')
+  const { data, error } = await sb.from('quotes').select('id,number,status,total,currency,customers(name)')
     .eq('business_id', S.bid).order('number', { ascending: false }).limit(50);
   if (error) return say(error.message);
   $('#ql').className = 'gr';
-  $('#ql').innerHTML = data.length ? data.map(x => `<div class="c" data-q="${x.id}" style="cursor:pointer"><div class="r"><span class="t">#${x.number} ${esc(x.customers?.name || 'Cliente ocasional')}</span><span class="t">$${fmt(x.total)}</span></div><div class="m">${x.status}</div></div>`).join('')
+  $('#ql').innerHTML = data.length ? data.map(x => `<div class="c" data-q="${x.id}" style="cursor:pointer"><div class="r"><span class="t">#${x.number} ${esc(x.customers?.name || 'Cliente ocasional')}</span><span class="t">${mon(x.currency)}${fmt(x.total)}</span></div><div class="m">${x.status}</div></div>`).join('')
     : '<p class="m">Todavía no hay presupuestos.</p>';
   document.querySelectorAll('[data-q]').forEach(c => c.onclick = () => quoEdit(c.dataset.q));
 }
@@ -358,18 +370,18 @@ async function quoEdit(id, q = '') {
   if (qr.error) return say(qr.error.message);
   if (!S.cat) await catalog();
   const Q = qr.data, items = ir.data || [], cl = cu.data || [], c = cl.find(x => x.id == Q.customer_id);
-  const ro = Q.status == 'convertido', dis = ro ? ' disabled' : '';
+  const ro = Q.status == 'convertido', dis = ro ? ' disabled' : '', M = mon(Q.currency);
   const hits = q ? S.cat.filter(v => match(v, q)).slice(0, 8) : [];
   $('#v').innerHTML = `<div class="r"><button class="s" id="bk">Volver</button><span class="t">Presupuesto #${Q.number} (${Q.status})</span></div>
-    <label class="m">Lista de precios</label><select id="pl2"${dis}>${S.lists.map(l => `<option value="${l.id}"${l.id == Q.price_list_id ? ' selected' : ''}>Lista ${esc(l.name)}</option>`).join('')}</select>
+    <label class="m">Lista de precios</label><select id="pl2"${dis}>${S.lists.map(l => `<option value="${l.id}"${l.id == Q.price_list_id ? ' selected' : ''}>Lista ${esc(l.name)} (${l.currency})</option>`).join('')}</select>
     <label class="m">Cliente</label><select id="cu"${dis}><option value="">Cliente ocasional (sin nombre)</option>${cl.map(x => `<option value="${x.id}"${x.id == Q.customer_id ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}<option value="+">+ Nuevo cliente</option></select>
     ${ro ? '' : `<input id="sq" type="search" placeholder="Agregar producto: escribí para buscar" value="${esc(q)}">`}
-    ${hits.map(v => `<button class="s" data-a="${v.id}">${esc(v.name)} ($${fmt(priceOf(v, Q.price_list_id, 1))})</button>`).join('')}
+    ${hits.map(v => `<button class="s" data-a="${v.id}">${esc(v.name)} (${M}${fmt(priceOf(v, Q.price_list_id, 1))})</button>`).join('')}
     <div id="it">${items.map(i => `<div class="c" data-i="${i.id}"><div class="r"><span>${esc(i.description)}</span><button class="s x"${dis}>Quitar</button></div>
       <div class="g"><input class="iq" type="number" step="any" value="${i.qty}"${dis}><input class="ip" type="number" step="any" value="${i.unit_price}"${dis}></div>
-      <div class="m">Cantidad, precio unitario | Subtotal $${fmt(i.line_total)}</div></div>`).join('') || '<p class="m">Buscá un producto para agregarlo.</p>'}</div>
+      <div class="m">Cantidad, precio unitario | Subtotal ${M}${fmt(i.line_total)}</div></div>`).join('') || '<p class="m">Buscá un producto para agregarlo.</p>'}</div>
     <label class="m">Descuento general (%)</label><input id="dc" type="number" step="any" min="0" max="100" value="${Q.discount_pct}"${dis}>
-    <div class="r"><span class="t">Total</span><span class="t" style="font-size:22px">$${fmt(Q.total)}</span></div>
+    <div class="r"><span class="t">Total</span><span class="t" style="font-size:22px">${M}${fmt(Q.total)}</span></div>
     <button class="s" id="pr">Imprimir</button>
     ${ro ? '' : `<div class="g"><button id="wa">Enviar por WhatsApp</button><button class="s" id="cv">Convertir en venta</button></div>`}`;
   const upd = async o => { const { error } = await sb.from('quotes').update(o).eq('id', id); error ? say(error.message) : quoEdit(id, q); };
@@ -377,15 +389,31 @@ async function quoEdit(id, q = '') {
   $('#pr').onclick = () => {
     const w = window.open('', '_blank');
     if (!w) return say('El navegador bloqueó la ventana. Permití las ventanas emergentes.');
+    const cd = i => S.cat.find(x => x.id == i.variant_id)?.code || '';
     w.document.write(`<!doctype html><meta charset="utf-8"><title>Presupuesto ${Q.number}</title>
-      <style>body{font:14px Arial,sans-serif;margin:32px;color:#111}h1{font-size:22px;margin:0}table{width:100%;border-collapse:collapse;margin:20px 0}th,td{padding:8px;border-bottom:1px solid #ddd;text-align:left}.n{text-align:right}.t{font-size:18px;font-weight:bold}</style>
-      <h1>${esc(S.bname)}</h1><p>Presupuesto Nº ${Q.number} | ${new Date(Q.created_at).toLocaleDateString('es-AR')}<br>Cliente: ${esc(c ? c.name : 'Cliente ocasional')}</p>
-      <table><tr><th>Cant.</th><th>Producto</th><th class="n">Precio unit.</th><th class="n">Subtotal</th></tr>
-      ${items.map(i => `<tr><td>${i.qty}</td><td>${esc(i.description)}</td><td class="n">$${fmt(i.unit_price)}</td><td class="n">$${fmt(i.line_total)}</td></tr>`).join('')}</table>
-      <p class="n">${+Q.discount_pct ? `Subtotal $${fmt(Q.subtotal)}<br>Descuento ${Q.discount_pct}%<br>` : ''}<span class="t">TOTAL $${fmt(Q.total)}</span></p>`);
+      <style>body{font:14px Arial,sans-serif;margin:32px;color:#111}h1{font-size:22px;margin:0 0 8px}table{width:100%;border-collapse:collapse;margin:16px 0}th,td{padding:8px;border-bottom:1px solid #ddd;text-align:left}.n{text-align:right}.t{font-size:18px;font-weight:bold}.i td{border:0;padding:2px 0}</style>
+      <h1>Presupuesto Nº ${Q.number}</h1>
+      <table class="i"><tr><td>Vendedor: ${esc(S.bname)}</td><td class="n">Fecha: ${new Date(Q.created_at).toLocaleDateString('es-AR')}</td></tr>
+      <tr><td>Cliente: ${esc(c ? c.name : 'Cliente ocasional')}</td><td class="n">Moneda: ${MN[Q.currency] || Q.currency}</td></tr></table>
+      <table><tr><th>Código</th><th>Producto</th><th class="n">Cant.</th><th class="n">Precio unitario</th><th class="n">Precio por cantidad</th></tr>
+      ${items.map(i => `<tr><td>${esc(cd(i))}</td><td>${esc(i.description)}</td><td class="n">${i.qty}</td><td class="n">${M}${fmt(i.unit_price)}</td><td class="n">${M}${fmt(i.line_total)}</td></tr>`).join('')}</table>
+      <p class="n">${+Q.discount_pct ? `Subtotal ${M}${fmt(Q.subtotal)}<br>Descuento ${Q.discount_pct}%<br>` : ''}<span class="t">TOTAL ${M}${fmt(Q.total)} (${Q.currency})</span></p>`);
     w.document.close(); w.focus(); setTimeout(() => w.print(), 300);
   };
-  $('#pl2').onchange = e => upd({ price_list_id: e.target.value });
+  $('#pl2').onchange = async e => {
+    const l = S.lists.find(x => x.id == e.target.value);
+    if (items.length && !confirm('Al cambiar la lista se recalculan los precios de los productos. ¿Seguir?')) return quoEdit(id, q);
+    let miss = 0;
+    for (const i of items) {
+      const v = S.cat.find(x => x.id == i.variant_id);
+      if (!v) continue;
+      const np = priceOf(v, l.id, i.qty);
+      if (!np) miss++;
+      await sb.from('quote_items').update({ unit_price: np }).eq('id', i.id);
+    }
+    await upd({ price_list_id: l.id, currency: l.currency });
+    if (miss) say(`${miss} producto(s) no tienen precio en esa lista.`);
+  };
   $('#dc').onchange = e => upd({ discount_pct: Math.min(100, Math.max(0, +e.target.value || 0)) });
   $('#cu').onchange = async e => {
     let v = e.target.value || null;
@@ -414,8 +442,8 @@ async function quoEdit(id, q = '') {
     r.querySelector('.x').onclick = async () => { await sb.from('quote_items').delete().eq('id', iid); quoEdit(id, q); };
   });
   $('#wa').onclick = async () => {
-    const t = `Presupuesto #${Q.number} - ${S.bname}\n` + items.map(i => `${i.qty} x ${i.description} - $${fmt(i.line_total)}`).join('\n')
-      + (+Q.discount_pct ? `\nDescuento ${Q.discount_pct}%` : '') + `\nTOTAL: $${fmt(Q.total)}`;
+    const t = `Presupuesto #${Q.number} - ${S.bname}\n` + items.map(i => `${i.qty} x ${i.description} - ${M}${fmt(i.line_total)}`).join('\n')
+      + (+Q.discount_pct ? `\nDescuento ${Q.discount_pct}%` : '') + `\nTOTAL: ${M}${fmt(Q.total)}`;
     window.open(`https://wa.me/${(c?.phone || '').replace(/\D/g, '')}?text=${encodeURIComponent(t)}`);
     if (Q.status == 'borrador') await sb.from('quotes').update({ status: 'enviado' }).eq('id', id);
   };
