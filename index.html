@@ -356,7 +356,7 @@ async function quoView() {
     .eq('business_id', S.bid).order('number', { ascending: false }).limit(50);
   if (error) return say(error.message);
   $('#ql').className = 'gr';
-  $('#ql').innerHTML = data.length ? data.map(x => `<div class="c" data-q="${x.id}" style="cursor:pointer"><div class="r"><span class="t">#${x.number} ${esc(x.customers?.name || 'Cliente ocasional')}</span><span class="t">${mon(x.currency)}${fmt(x.total)}</span></div><div class="m">${x.status}</div></div>`).join('')
+  $('#ql').innerHTML = data.length ? data.map(x => `<div class="c" data-q="${x.id}" style="cursor:pointer"><div class="r"><span class="t">${esc(x.customers?.name || 'Cliente ocasional')}</span><span class="t">${mon(x.currency)}${fmt(x.total)}</span></div><div class="m">#${x.number} | ${x.status}</div></div>`).join('')
     : '<p class="m">Todavía no hay presupuestos.</p>';
   document.querySelectorAll('[data-q]').forEach(c => c.onclick = () => quoEdit(c.dataset.q));
 }
@@ -372,7 +372,7 @@ async function quoEdit(id, q = '') {
   const Q = qr.data, items = ir.data || [], cl = cu.data || [], c = cl.find(x => x.id == Q.customer_id);
   const ro = Q.status == 'convertido', dis = ro ? ' disabled' : '', M = mon(Q.currency);
   const hits = q ? S.cat.filter(v => match(v, q)).slice(0, 8) : [];
-  $('#v').innerHTML = `<div class="r"><button class="s" id="bk">Volver</button><span class="t">Presupuesto #${Q.number} (${Q.status})</span></div>
+  $('#v').innerHTML = `<div class="r"><button class="s" id="bk">Volver</button></div><div class="t" style="font-size:26px;margin-top:8px">${esc(c ? c.name : 'Cliente ocasional')}</div><div class="m">Presupuesto #${Q.number} | ${Q.status}</div>
     <label class="m">Lista de precios</label><select id="pl2"${dis}>${S.lists.map(l => `<option value="${l.id}"${l.id == Q.price_list_id ? ' selected' : ''}>Lista ${esc(l.name)} (${l.currency})</option>`).join('')}</select>
     <label class="m">Cliente</label><select id="cu"${dis}><option value="">Cliente ocasional (sin nombre)</option>${cl.map(x => `<option value="${x.id}"${x.id == Q.customer_id ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}<option value="+">+ Nuevo cliente</option></select>
     ${ro ? '' : `<input id="sq" type="search" placeholder="Agregar producto: escribí para buscar" value="${esc(q)}">`}
@@ -391,10 +391,10 @@ async function quoEdit(id, q = '') {
     if (!w) return say('El navegador bloqueó la ventana. Permití las ventanas emergentes.');
     const cd = i => S.cat.find(x => x.id == i.variant_id)?.code || '';
     w.document.write(`<!doctype html><meta charset="utf-8"><title>Presupuesto ${Q.number}</title>
-      <style>body{font:14px Arial,sans-serif;margin:32px;color:#111}h1{font-size:22px;margin:0 0 8px}table{width:100%;border-collapse:collapse;margin:16px 0}th,td{padding:8px;border-bottom:1px solid #ddd;text-align:left}.n{text-align:right}.t{font-size:18px;font-weight:bold}.i td{border:0;padding:2px 0}</style>
-      <h1>Presupuesto Nº ${Q.number}</h1>
+      <style>body{font:14px Arial,sans-serif;margin:32px;color:#111}h1{font-size:32px;margin:0 0 4px}table{width:100%;border-collapse:collapse;margin:16px 0}th,td{padding:8px;border-bottom:1px solid #ddd;text-align:left}.n{text-align:right}.t{font-size:18px;font-weight:bold}.i td{border:0;padding:2px 0}</style>
+      <h1>${esc(c ? c.name : 'Cliente ocasional')}</h1>
       <table class="i"><tr><td>Vendedor: ${esc(S.bname)}</td><td class="n">Fecha: ${new Date(Q.created_at).toLocaleDateString('es-AR')}</td></tr>
-      <tr><td>Cliente: ${esc(c ? c.name : 'Cliente ocasional')}</td><td class="n">Moneda: ${MN[Q.currency] || Q.currency}</td></tr></table>
+      <tr><td>Presupuesto Nº ${Q.number}</td><td class="n">Moneda: ${MN[Q.currency] || Q.currency}</td></tr></table>
       <table><tr><th>Código</th><th>Producto</th><th class="n">Cant.</th><th class="n">Precio unitario</th><th class="n">Precio por cantidad</th></tr>
       ${items.map(i => `<tr><td>${esc(cd(i))}</td><td>${esc(i.description)}</td><td class="n">${i.qty}</td><td class="n">${M}${fmt(i.unit_price)}</td><td class="n">${M}${fmt(i.line_total)}</td></tr>`).join('')}</table>
       <p class="n">${+Q.discount_pct ? `Subtotal ${M}${fmt(Q.subtotal)}<br>Descuento ${Q.discount_pct}%<br>` : ''}<span class="t">TOTAL ${M}${fmt(Q.total)} (${Q.currency})</span></p>`);
