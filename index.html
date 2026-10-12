@@ -81,18 +81,18 @@ async function auth(fn) {
 
 /* ---------- Comercio ---------- */
 async function load() {
-  const { data, error } = await sb.from('members').select('business_id,businesses(name)').limit(1);
+  const { data, error } = await sb.from('members').select('business_id,role,businesses(name)').limit(1);
   if (error) return say(error.message);
   if (!data.length) return bizView();
-  S.bid = data[0].business_id; S.bname = data[0].businesses.name;
+  S.bid = data[0].business_id; S.bname = data[0].businesses.name; S.role = data[0].role;
   const l = await sb.from('price_lists').select('id,name,currency').eq('business_id', S.bid).order('name');
   S.lists = l.data || [];
-  const w = await sb.from('warehouses').select('id').eq('business_id', S.bid).limit(1);
-  S.wh = w.data?.[0]?.id;
+  await loadWhs();
   shell();
 }
 function bizView() {
-  $('#app').innerHTML = `<h1>Creá tu comercio</h1><input id="bn" placeholder="Nombre del comercio"><button id="bc">Crear comercio</button>`;
+  $('#app').innerHTML = `<h1>Creá tu comercio</h1><input id="bn" placeholder="Nombre del comercio"><button id="bc">Crear comercio</button><p class="m">Si trabajás en un comercio que ya usa el sistema, pedile al dueño que te agregue con tu email y tocá Actualizar.</p><button class="s" id="br">Actualizar</button>`;
+  $('#br').onclick = load;
   $('#bc').onclick = async () => {
     const name = $('#bn').value.trim();
     if (!name) return say('Escribí el nombre del comercio.');
@@ -100,13 +100,24 @@ function bizView() {
     error ? say(error.message) : load();
   };
 }
+async function loadWhs() {
+  const w = await sb.from('warehouses').select('id,name').eq('business_id', S.bid).order('name');
+  S.whs = w.data || [];
+  let sv = null; try { sv = localStorage.getItem('wh' + S.bid); } catch (_) {}
+  S.wh = S.whs.find(x => x.id == sv)?.id || S.whs[0]?.id;
+}
 function shell() {
-  const tabs = [['prod', 'Productos'], ['stock', 'Stock'], ['quo', 'Presupuestos'], ['ven', 'Ventas'], ['imp', 'Importar'], ['pre', 'Precios']];
+  const adm = S.role != 'seller';
+  const tabs = [['prod', 'Productos'], ['stock', 'Stock'], ['quo', 'Presupuestos'], ['cli', 'Clientes'], ['ven', 'Ventas'],
+    ...(adm ? [['imp', 'Importar'], ['pre', 'Precios'], ['aju', 'Ajustes']] : [])];
+  if (!tabs.some(t => t[0] == S.tab)) S.tab = 'prod';
   $('#app').innerHTML = `<div class="sh"><div class="sd"><div class="r"><h1>${esc(S.bname)}</h1><button class="s" id="out">Salir</button></div>
+    ${S.whs.length > 1 ? `<select id="wsel">${S.whs.map(w => `<option value="${w.id}"${w.id == S.wh ? ' selected' : ''}>Local: ${esc(w.name)}</option>`).join('')}</select>` : ''}
     <nav>${tabs.map(([k, n]) => `<button data-t="${k}" class="${S.tab == k ? 'on' : ''}">${n}</button>`).join('')}</nav></div><div id="v"></div></div>`;
   $('#out').onclick = async () => { await sb.auth.signOut(); say(); authView(); };
+  if ($('#wsel')) $('#wsel').onchange = e => { S.wh = e.target.value; try { localStorage.setItem('wh' + S.bid, S.wh); } catch (_) {} shell(); };
   document.querySelectorAll('nav button').forEach(b => b.onclick = () => { S.tab = b.dataset.t; say(); shell(); });
-  ({ prod: prodView, stock: stockView, quo: quoView, ven: ventasView, imp: impView, pre: preView })[S.tab]();
+  ({ prod: prodView, stock: stockView, quo: quoView, cli: clientesView, ven: ventasView, imp: impView, pre: preView, aju: ajustesView })[S.tab]();
 }
 
 /* ---------- Alta de productos (una o muchas filas) ---------- */
@@ -178,6 +189,10 @@ async function prodView(q = '') {
     S.cat = null; say(er ? er.message : 'Cambios guardados.');
     if (!er) prodView(q);
   });
+  if (S.role == 'seller') {
+    $('#v > details')?.remove();
+    document.querySelectorAll('#pl details input,#pl details select,#pl details button,#pl details label').forEach(e => e.remove());
+  }
 }
 
 /* ---------- Importar CSV ---------- */
@@ -306,24 +321,134 @@ async function ventasView(d = new Date().toLocaleDateString('sv-SE')) {
       <a class="b" href="https://www.arca.gob.ar" target="_blank" rel="noopener">Portal de ARCA</a></div>`;
   $('#vd').onchange = e => e.target.value && ventasView(e.target.value);
   const a = new Date(d + 'T00:00:00'), z = new Date(a.getTime() + 864e5);
-  const { data, error } = await sb.from('sales').select('id,total,currency,created_at,customers(name),sale_items(description,qty)')
+  const { data, error } = await sb.from('sales').select('id,total,returned_total,currency,status,on_account,created_at,customers(name),sale_items(id,description,qty,returned_qty)')
     .eq('business_id', S.bid).gte('created_at', a.toISOString()).lt('created_at', z.toISOString()).order('created_at', { ascending: false });
   if (error) return ($('#vs').textContent = error.message);
   const tot = {}, pr = {};
-  data.forEach(x => { tot[x.currency] = (tot[x.currency] || 0) + +x.total; x.sale_items.forEach(i => { pr[i.description] = (pr[i.description] || 0) + +i.qty; }); });
+  data.filter(x => x.status == 'activa').forEach(x => {
+    tot[x.currency] = (tot[x.currency] || 0) + +x.total - +x.returned_total;
+    x.sale_items.forEach(i => { pr[i.description] = (pr[i.description] || 0) + +i.qty - +i.returned_qty; });
+  });
   const tt = Object.entries(tot).map(([c, v]) => `${mon(c)}${fmt(v)}`).join('  |  ') || `${mon('ARS')}${fmt(0)}`;
+  const nact = data.filter(x => x.status == 'activa').length;
   $('#vs').className = '';
-  $('#vs').innerHTML = `<div class="c"><span class="m">Total del día (${data.length} ${data.length == 1 ? 'venta' : 'ventas'})</span><div class="t" style="font-size:28px">${tt}</div></div>`
-    + data.map(x => `<div class="r c"><span>${new Date(x.created_at).toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' })} ${esc(x.customers?.name || 'Cliente ocasional')}</span><span class="t">${mon(x.currency)}${fmt(x.total)}</span></div>`).join('')
-    + (data.length ? `<p class="t">Productos vendidos</p>` + Object.entries(pr).sort((u, w) => w[1] - u[1]).map(([n, q]) => `<div class="r c"><span>${esc(n)}</span><span class="t">${q}</span></div>`).join('')
-      : '<p class="m">No hay ventas en esta fecha.</p>');
+  $('#vs').innerHTML = `<div class="c"><span class="m">Total del día, sin devoluciones ni anuladas (${nact} ${nact == 1 ? 'venta' : 'ventas'})</span><div class="t" style="font-size:28px">${tt}</div></div>`
+    + data.map(x => {
+      const tag = x.status == 'anulada' ? 'anulada' : x.on_account ? 'a cuenta' : '', act = x.status == 'activa';
+      return `<details class="c" data-s="${x.id}"><summary><div class="r"><span>${new Date(x.created_at).toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' })} ${esc(x.customers?.name || 'Cliente ocasional')}${tag ? ` <span class="m">(${tag})</span>` : ''}</span>
+        <span class="t"${act ? '' : ' style="text-decoration:line-through"'}>${mon(x.currency)}${fmt(+x.total - +x.returned_total)}</span></div></summary>
+        ${x.sale_items.map(i => `<div class="r"><span>${esc(i.description)} x${i.qty}${+i.returned_qty ? ` <span class="m">(devueltos ${i.returned_qty})</span>` : ''}</span>
+          ${act && i.qty > i.returned_qty ? `<input class="rq" data-i="${i.id}" type="number" step="any" min="0" max="${i.qty - i.returned_qty}" placeholder="Devolver" style="width:96px">` : ''}</div>`).join('')}
+        ${act ? `<div class="g"><button class="s rt">Devolver lo indicado</button>${S.role != 'seller' ? '<button class="s an">Anular venta</button>' : ''}</div>` : ''}</details>`;
+    }).join('')
+    + (nact ? `<p class="t">Productos vendidos</p>` + Object.entries(pr).filter(e => e[1] > 0).sort((u, w) => w[1] - u[1]).map(([n, q]) => `<div class="r c"><span>${esc(n)}</span><span class="t">${q}</span></div>`).join('')
+      : '<p class="m">No hay ventas activas en esta fecha.</p>');
+  document.querySelectorAll('#vs .rt').forEach(b => b.onclick = async () => {
+    const dt = b.closest('details');
+    const items = [...dt.querySelectorAll('.rq')].filter(i => +i.value > 0).map(i => ({ id: i.dataset.i, qty: +i.value }));
+    if (!items.length) return say('Escribí la cantidad a devolver en algún producto.');
+    const { error } = await sb.rpc('return_sale_items', { p_sale: dt.dataset.s, p_items: items });
+    if (error) return say(error.message);
+    say('Devolución registrada. El stock volvió al local de la venta.'); ventasView(d);
+  });
+  document.querySelectorAll('#vs .an').forEach(b => b.onclick = async () => {
+    if (!confirm('¿Anular esta venta? Se devuelve todo el stock pendiente.')) return;
+    const { error } = await sb.rpc('cancel_sale', { p_sale: b.closest('details').dataset.s });
+    if (error) return say(error.message);
+    say('Venta anulada.'); ventasView(d);
+  });
+}
+
+/* ---------- Clientes y cuenta corriente ---------- */
+async function clientesView() {
+  $('#v').innerHTML = `<details class="c"><summary class="t">+ Nuevo cliente</summary><input id="cn" placeholder="Nombre"><input id="cp" placeholder="WhatsApp (opcional)"><button id="cs">Guardar cliente</button></details><div id="cl" class="m">Cargando…</div>`;
+  $('#cs').onclick = async () => {
+    const name = $('#cn').value.trim();
+    if (!name) return say('Falta el nombre del cliente.');
+    const { error } = await sb.from('customers').insert({ business_id: S.bid, name, phone: $('#cp').value.trim() || null });
+    error ? say(error.message) : clientesView();
+  };
+  const [cu, bl] = await Promise.all([
+    pg(() => sb.from('customers').select('id,name,phone').eq('business_id', S.bid).order('name')),
+    pg(() => sb.from('customer_balances').select('customer_id,currency,balance').eq('business_id', S.bid).order('customer_id').order('currency'))
+  ]);
+  const bal = {};
+  bl.forEach(b => { if (+b.balance) (bal[b.customer_id] = bal[b.customer_id] || []).push(b); });
+  $('#cl').className = 'gr';
+  $('#cl').innerHTML = cu.map(c => {
+    const t = (bal[c.id] || []).map(x => `${mon(x.currency)}${fmt(x.balance)}`).join(' | ');
+    return `<div class="c" data-c="${c.id}" style="cursor:pointer"><div class="r"><span class="t">${esc(c.name)}</span><span class="t"${t ? ' style="color:#c0392b"' : ''}>${t || 'Al día'}</span></div><div class="m">${esc(c.phone || '')}</div></div>`;
+  }).join('') || '<p class="m">Todavía no hay clientes.</p>';
+  document.querySelectorAll('[data-c]').forEach(e => e.onclick = () => cuentaView(e.dataset.c));
+}
+
+async function cuentaView(id) {
+  const [cr, sr, pr] = await Promise.all([
+    sb.from('customers').select('name').eq('id', id).single(),
+    sb.from('sales').select('total,returned_total,currency,created_at,status').eq('customer_id', id).eq('on_account', true).order('created_at', { ascending: false }).limit(100),
+    sb.from('payments').select('amount,currency,method,created_at').eq('customer_id', id).order('created_at', { ascending: false }).limit(100)
+  ]);
+  const mv = [
+    ...(sr.data || []).filter(x => x.status == 'activa').map(x => ({ d: x.created_at, t: 'Venta a cuenta', a: +x.total - +x.returned_total, c: x.currency })),
+    ...(pr.data || []).map(x => ({ d: x.created_at, t: `Cobro (${x.method})`, a: -x.amount, c: x.currency }))
+  ].sort((a, b) => b.d.localeCompare(a.d));
+  const bal = {};
+  mv.forEach(m => { bal[m.c] = (bal[m.c] || 0) + m.a; });
+  const st = Object.entries(bal).filter(e => Math.abs(e[1]) > 0.004).map(([c, v]) => `${mon(c)}${fmt(v)}`).join(' | ') || 'Al día';
+  $('#v').innerHTML = `<div class="r"><button class="s" id="bk2">Volver</button></div>
+    <div class="t" style="font-size:26px;margin-top:8px">${esc(cr.data?.name || '')}</div>
+    <div class="c"><span class="m">Saldo (lo que debe)</span><div class="t" style="font-size:24px">${st}</div></div>
+    <details class="c"><summary class="t">Registrar cobro</summary>
+      <input id="pa" type="number" step="any" min="0" placeholder="Monto">
+      <select id="pc"><option value="ARS">Pesos</option><option value="USD">Dólares</option></select>
+      <select id="pm"><option>efectivo</option><option>transferencia</option><option>cheque</option><option>otro</option></select>
+      <button id="ps">Guardar cobro</button></details>
+    ${mv.map(m => `<div class="c r"><span>${new Date(m.d).toLocaleDateString('es-AR')} <span class="m">${m.t}</span></span><span class="t">${m.a < 0 ? '-' : ''}${mon(m.c)}${fmt(Math.abs(m.a))}</span></div>`).join('') || '<p class="m">Sin movimientos.</p>'}`;
+  $('#bk2').onclick = clientesView;
+  $('#ps').onclick = async () => {
+    const amount = +$('#pa').value;
+    if (!(amount > 0)) return say('Escribí el monto cobrado.');
+    const { error } = await sb.from('payments').insert({ business_id: S.bid, customer_id: id, amount, currency: $('#pc').value, method: $('#pm').value });
+    if (error) return say(error.message);
+    say('Cobro registrado.'); cuentaView(id);
+  };
+}
+
+/* ---------- Ajustes: locales y usuarios ---------- */
+async function ajustesView() {
+  const mr = await sb.rpc('list_members', { p_business: S.bid });
+  $('#v').innerHTML = `<p class="t">Locales</p>${S.whs.map(w => `<div class="c">${esc(w.name)}</div>`).join('')}
+    <input id="wn" placeholder="Nuevo local (ej: Flores)"><button id="wb">Agregar local</button>
+    <p class="t" style="margin-top:28px">Usuarios</p>
+    ${(mr.data || []).map(m => `<div class="c r"><span>${esc(m.email)} <span class="m">${m.role == 'owner' ? 'dueño' : m.role == 'admin' ? 'administrador' : 'vendedor'}</span></span>${m.role == 'owner' ? '' : `<button class="s" data-rm="${m.user_id}">Quitar</button>`}</div>`).join('')}
+    <input id="ue" type="email" placeholder="Email del usuario (ya debe tener cuenta)">
+    <select id="ur"><option value="seller">Vendedor</option><option value="admin">Administrador</option></select>
+    <button id="ub">Agregar usuario</button>
+    <p class="m">Vendedor: arma presupuestos, vende, cobra y hace devoluciones. No cambia precios ni productos, no anula ventas ni ve Importar, Precios y Ajustes. Administrador: puede todo, menos quitar al dueño.</p>`;
+  $('#wb').onclick = async () => {
+    const name = $('#wn').value.trim();
+    if (!name) return say('Escribí el nombre del local.');
+    const { error } = await sb.from('warehouses').insert({ business_id: S.bid, name });
+    if (error) return say(error.code === '23505' ? 'Ya existe un local con ese nombre.' : error.message);
+    await loadWhs(); say(`Local "${name}" creado.`); shell();
+  };
+  $('#ub').onclick = async () => {
+    const { error } = await sb.rpc('add_member', { p_business: S.bid, p_email: $('#ue').value, p_role: $('#ur').value });
+    if (error) return say(error.message);
+    say('Usuario agregado. Ya puede ingresar con su cuenta.'); ajustesView();
+  };
+  document.querySelectorAll('[data-rm]').forEach(b => b.onclick = async () => {
+    if (!confirm('¿Quitar a este usuario del comercio?')) return;
+    const { error } = await sb.rpc('remove_member', { p_business: S.bid, p_user: b.dataset.rm });
+    error ? say(error.message) : ajustesView();
+  });
 }
 
 /* ---------- Stock ---------- */
 async function stockView(q = '') {
   $('#v').innerHTML = `<input id="q" type="search" placeholder="Buscar producto" value="${esc(q)}"><div id="sl" class="m">Cargando…</div>`;
   $('#q').onchange = e => stockView(e.target.value.trim());
-  const [cat, st] = await Promise.all([catalog(), pg(() => sb.from('stock_levels').select('variant_id,qty').eq('business_id', S.bid).order('variant_id').order('warehouse_id'))]);
+  const [cat, st] = await Promise.all([catalog(), pg(() => sb.from('stock_levels').select('variant_id,qty').eq('business_id', S.bid).eq('warehouse_id', S.wh).order('variant_id'))]);
   const lv = {};
   st.forEach(x => { lv[x.variant_id] = (lv[x.variant_id] || 0) + +x.qty; });
   $('#sl').className = 'gr';
@@ -331,9 +456,9 @@ async function stockView(q = '') {
     const n = lv[v.id] || 0;
     return `<details class="c" data-v="${v.id}" data-n="${n}"><summary><div class="r"><span class="t">${esc(v.name)}</span><span class="t"${n <= 0 ? ' style="color:#c0392b"' : ''}>${n}</span></div><div class="m">${esc(v.code)}</div></summary>
       <input type="number" step="any" min="0" placeholder="Cantidad">
-      <div class="g"><button data-k="ingreso">Ingreso</button><button class="s" data-k="egreso">Egreso</button><button class="s" data-k="ajuste">Fijar total</button></div></details>`;
+      <div class="g"><button data-k="ingreso">Ingreso</button><button class="s" data-k="egreso">Egreso</button><button class="s" data-k="ajuste">Fijar total</button></div>${S.whs.length > 1 ? `<div class="g"><select class="to">${S.whs.filter(w => w.id != S.wh).map(w => `<option value="${w.id}">${esc(w.name)}</option>`).join('')}</select><button class="s tr">Transferir</button></div>` : ''}</details>`;
   }).join('') || '<p class="m">No hay productos.</p>';
-  document.querySelectorAll('#sl .g button').forEach(b => b.onclick = async () => {
+  document.querySelectorAll('#sl [data-k]').forEach(b => b.onclick = async () => {
     const d = b.closest('details'), inp = d.querySelector('input'), x = +inp.value, k = b.dataset.k;
     if (inp.value === '' || x < 0) return say('Escribí una cantidad.');
     const qty = k == 'ingreso' ? x : k == 'egreso' ? -x : x - +d.dataset.n;
@@ -341,6 +466,13 @@ async function stockView(q = '') {
     const { error } = await sb.from('stock_movements').insert({ business_id: S.bid, warehouse_id: S.wh, variant_id: d.dataset.v, qty, type: k });
     if (error) return say(error.message);
     say('Stock actualizado.'); stockView(q);
+  });
+  document.querySelectorAll('#sl .tr').forEach(b => b.onclick = async () => {
+    const d = b.closest('details'), x = +d.querySelector('input').value;
+    if (!(x > 0)) return say('Escribí una cantidad.');
+    const { error } = await sb.rpc('transfer_stock', { p_from: S.wh, p_to: d.querySelector('.to').value, p_variant: d.dataset.v, p_qty: x });
+    if (error) return say(error.message);
+    say('Transferencia registrada.'); stockView(q);
   });
 }
 
@@ -449,8 +581,9 @@ async function quoEdit(id, q = '') {
   };
   $('#cv').onclick = async () => {
     if (!items.length) return say('Agregá al menos un producto.');
-    if (!confirm('¿Convertir en venta y descontar el stock?')) return;
-    const { error } = await sb.rpc('convert_quote_to_sale', { p_quote_id: id, p_warehouse_id: S.wh });
+    if (!confirm('¿Convertir en venta y descontar el stock de ' + (S.whs.find(w => w.id == S.wh)?.name || 'este local') + '?')) return;
+    const oa = c ? confirm('¿Dejar la venta a cuenta corriente de ' + c.name + '?\n\nAceptar = a cuenta. Cancelar = pagada.') : false;
+    const { error } = await sb.rpc('convert_quote_to_sale', { p_quote_id: id, p_warehouse_id: S.wh, p_on_account: oa });
     if (error) return say(error.message);
     say('Venta registrada y stock descontado.'); quoEdit(id);
   };
