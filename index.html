@@ -25,6 +25,7 @@ nav button.on{color:var(--fg);border-color:var(--fg);font-weight:600}
 .g{display:flex;gap:8px}.g>*{flex:1}
 summary{cursor:pointer}
 #msg{font-size:14px;color:var(--mut);min-height:20px;margin-top:8px}
+textarea{font:12px/1.3 monospace;padding:10px;border:1px solid var(--bd);border-radius:8px;background:#fff;color:var(--fg);width:100%;min-height:96px;margin:4px 0}
 a.b{display:block;text-align:center;padding:11px 12px;border:1px solid var(--bd);border-radius:8px;color:var(--fg);text-decoration:none;margin:6px 0}
 @media(min-width:900px){
 main{max-width:1120px}
@@ -52,6 +53,7 @@ const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '
 const fmt = n => Number(n).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const mon = c => c == 'USD' ? 'US$ ' : '$';
 const MN = { ARS: 'Pesos argentinos (ARS)', USD: 'Dólares estadounidenses (USD)' };
+const TC = { 1: 'A', 6: 'B', 11: 'C' };
 const num = s => {
   s = String(s ?? '').trim().replace(/[$\s]/g, '');
   if (s.includes(',')) s = s.replace(/\./g, '').replace(',', '.');
@@ -109,7 +111,7 @@ async function loadWhs() {
 function shell() {
   const adm = S.role != 'seller';
   const tabs = [['prod', 'Productos'], ['stock', 'Stock'], ['quo', 'Presupuestos'], ['cli', 'Clientes'], ['ven', 'Ventas'],
-    ...(adm ? [['imp', 'Importar'], ['pre', 'Precios'], ['aju', 'Ajustes']] : [])];
+    ...(adm ? [['imp', 'Importar'], ['pre', 'Precios'], ['aju', 'Ajustes'], ['fac', 'Facturación']] : [])];
   if (!tabs.some(t => t[0] == S.tab)) S.tab = 'prod';
   $('#app').innerHTML = `<div class="sh"><div class="sd"><div class="r"><h1>${esc(S.bname)}</h1><button class="s" id="out">Salir</button></div>
     ${S.whs.length > 1 ? `<select id="wsel">${S.whs.map(w => `<option value="${w.id}"${w.id == S.wh ? ' selected' : ''}>Local: ${esc(w.name)}</option>`).join('')}</select>` : ''}
@@ -117,7 +119,7 @@ function shell() {
   $('#out').onclick = async () => { await sb.auth.signOut(); say(); authView(); };
   if ($('#wsel')) $('#wsel').onchange = e => { S.wh = e.target.value; try { localStorage.setItem('wh' + S.bid, S.wh); } catch (_) {} shell(); };
   document.querySelectorAll('nav button').forEach(b => b.onclick = () => { S.tab = b.dataset.t; say(); shell(); });
-  ({ prod: prodView, stock: stockView, quo: quoView, cli: clientesView, ven: ventasView, imp: impView, pre: preView, aju: ajustesView })[S.tab]();
+  ({ prod: prodView, stock: stockView, quo: quoView, cli: clientesView, ven: ventasView, imp: impView, pre: preView, aju: ajustesView, fac: facturacionView })[S.tab]();
 }
 
 /* ---------- Alta de productos (una o muchas filas) ---------- */
@@ -321,7 +323,7 @@ async function ventasView(d = new Date().toLocaleDateString('sv-SE')) {
       <a class="b" href="https://www.arca.gob.ar" target="_blank" rel="noopener">Portal de ARCA</a></div>`;
   $('#vd').onchange = e => e.target.value && ventasView(e.target.value);
   const a = new Date(d + 'T00:00:00'), z = new Date(a.getTime() + 864e5);
-  const { data, error } = await sb.from('sales').select('id,total,returned_total,currency,status,on_account,created_at,customers(name),sale_items(id,description,qty,returned_qty)')
+  const { data, error } = await sb.from('sales').select('id,total,returned_total,currency,status,on_account,created_at,customers(name),sale_items(id,description,qty,returned_qty),invoices(cbte_tipo,pto_vta,numero,cae,env)')
     .eq('business_id', S.bid).gte('created_at', a.toISOString()).lt('created_at', z.toISOString()).order('created_at', { ascending: false });
   if (error) return ($('#vs').textContent = error.message);
   const tot = {}, pr = {};
@@ -339,7 +341,8 @@ async function ventasView(d = new Date().toLocaleDateString('sv-SE')) {
         <span class="t"${act ? '' : ' style="text-decoration:line-through"'}>${mon(x.currency)}${fmt(+x.total - +x.returned_total)}</span></div></summary>
         ${x.sale_items.map(i => `<div class="r"><span>${esc(i.description)} x${i.qty}${+i.returned_qty ? ` <span class="m">(devueltos ${i.returned_qty})</span>` : ''}</span>
           ${act && i.qty > i.returned_qty ? `<input class="rq" data-i="${i.id}" type="number" step="any" min="0" max="${i.qty - i.returned_qty}" placeholder="Devolver" style="width:96px">` : ''}</div>`).join('')}
-        ${act ? `<div class="g"><button class="s rt">Devolver lo indicado</button>${S.role != 'seller' ? '<button class="s an">Anular venta</button>' : ''}</div>` : ''}</details>`;
+        ${x.invoices.length ? `<div class="m">Factura ${TC[x.invoices[0].cbte_tipo]} ${String(x.invoices[0].pto_vta).padStart(4, '0')}-${String(x.invoices[0].numero).padStart(8, '0')} | CAE ${x.invoices[0].cae}${x.invoices[0].env == 'homologacion' ? ' (PRUEBA)' : ''}</div>` : act && S.role != 'seller' ? '<button class="s fa">Facturar</button>' : ''}
+        ${act ? `<div class="g"><button class="s rt">Devolver lo indicado</button>${S.role != 'seller' && !x.invoices.length ? '<button class="s an">Anular venta</button>' : ''}</div>` : ''}</details>`;
     }).join('')
     + (nact ? `<p class="t">Productos vendidos</p>` + Object.entries(pr).filter(e => e[1] > 0).sort((u, w) => w[1] - u[1]).map(([n, q]) => `<div class="r c"><span>${esc(n)}</span><span class="t">${q}</span></div>`).join('')
       : '<p class="m">No hay ventas activas en esta fecha.</p>');
@@ -357,15 +360,29 @@ async function ventasView(d = new Date().toLocaleDateString('sv-SE')) {
     if (error) return say(error.message);
     say('Venta anulada.'); ventasView(d);
   });
+  document.querySelectorAll('#vs .fa').forEach(b => b.onclick = async () => {
+    const dt = b.closest('details'), sale = data.find(x => x.id == dt.dataset.s);
+    let cot;
+    if (sale.currency == 'USD') {
+      cot = num(prompt('Cotización del dólar (pesos por 1 USD) para ARCA:'));
+      if (!(cot > 0)) return say('Cotización inválida.');
+    }
+    if (!confirm('¿Emitir la factura electrónica de esta venta?')) return;
+    say('Pidiendo el CAE a ARCA…'); b.disabled = true;
+    try {
+      const r = await fiscal({ action: 'emit', sale_id: dt.dataset.s, cotizacion: cot });
+      say(`Factura ${r.numero_fmt} emitida. CAE ${r.cae}${r.env == 'homologacion' ? ' (prueba, sin validez)' : ''}`); ventasView(d);
+    } catch (e) { say(e.message); b.disabled = false; }
+  });
 }
 
 /* ---------- Clientes y cuenta corriente ---------- */
 async function clientesView() {
-  $('#v').innerHTML = `<details class="c"><summary class="t">+ Nuevo cliente</summary><input id="cn" placeholder="Nombre"><input id="cp" placeholder="WhatsApp (opcional)"><button id="cs">Guardar cliente</button></details><div id="cl" class="m">Cargando…</div>`;
+  $('#v').innerHTML = `<details class="c"><summary class="t">+ Nuevo cliente</summary><input id="cn" placeholder="Nombre"><input id="cp" placeholder="WhatsApp (opcional)"><input id="ct" placeholder="CUIT o DNI (para facturar)"><select id="ci"><option value="5">Consumidor final</option><option value="1">Responsable inscripto</option><option value="6">Monotributista</option></select><button id="cs">Guardar cliente</button></details><div id="cl" class="m">Cargando…</div>`;
   $('#cs').onclick = async () => {
     const name = $('#cn').value.trim();
     if (!name) return say('Falta el nombre del cliente.');
-    const { error } = await sb.from('customers').insert({ business_id: S.bid, name, phone: $('#cp').value.trim() || null });
+    const { error } = await sb.from('customers').insert({ business_id: S.bid, name, phone: $('#cp').value.trim() || null, tax_id: $('#ct').value.trim() || null, iva_cond: +$('#ci').value });
     error ? say(error.message) : clientesView();
   };
   const [cu, bl] = await Promise.all([
@@ -411,6 +428,63 @@ async function cuentaView(id) {
     const { error } = await sb.from('payments').insert({ business_id: S.bid, customer_id: id, amount, currency: $('#pc').value, method: $('#pm').value });
     if (error) return say(error.message);
     say('Cobro registrado.'); cuentaView(id);
+  };
+}
+
+/* ---------- Facturación electrónica (ARCA) ---------- */
+async function fiscal(body) {
+  const { data, error } = await sb.functions.invoke('fiscal', { body: { business_id: S.bid, ...body } });
+  if (error) {
+    let m = error.message;
+    try { m = (await error.context.json()).error || m; } catch (_) {}
+    throw new Error(m);
+  }
+  if (data?.error) throw new Error(data.error);
+  return data;
+}
+async function facturacionView() {
+  const { data: f } = await sb.from('fiscal_settings').select('*').eq('business_id', S.bid).maybeSingle();
+  let st = {};
+  if (f) { try { st = await fiscal({ action: 'status' }); } catch (e) { say(e.message); } }
+  $('#v').innerHTML = `<p class="m">Facturación electrónica con ARCA. Empezá siempre en <b>Pruebas</b>: ahí las facturas no tienen validez.</p>
+    <input id="fc" inputmode="numeric" placeholder="CUIT (11 números, sin guiones)" value="${esc(f?.cuit || '')}">
+    <input id="fn" placeholder="Razón social o nombre" value="${esc(f?.legal_name || '')}">
+    <select id="fi"><option value="monotributo"${f?.iva_condition == 'monotributo' ? ' selected' : ''}>Monotributista (Factura C)</option><option value="inscripto"${f?.iva_condition == 'inscripto' ? ' selected' : ''}>Responsable Inscripto (Factura A o B)</option></select>
+    <input id="fp" type="number" min="1" placeholder="Punto de venta (ej: 1)" value="${f?.pto_vta || ''}">
+    <select id="fe"><option value="homologacion"${f?.env != 'produccion' ? ' selected' : ''}>Ambiente: Pruebas</option><option value="produccion"${f?.env == 'produccion' ? ' selected' : ''}>Ambiente: Producción (facturas reales)</option></select>
+    <button id="fs">Guardar datos fiscales</button>
+    ${f ? `<div class="c"><b>Certificado digital</b>
+      <p class="m">Clave: ${st.has_key ? 'generada' : 'pendiente'} | Certificado: ${st.has_cert ? 'cargado' : 'pendiente'}</p>
+      <button class="s" id="fk">1. Generar solicitud (CSR)</button>
+      <textarea id="fq" readonly placeholder="Acá aparece la solicitud. Copiala y subila a ARCA."></textarea>
+      <textarea id="fcrt" placeholder="2. Pegá acá el certificado (.crt) que te da ARCA"></textarea>
+      <button id="fcs">Guardar certificado</button></div>` : ''}`;
+  $('#fs').onclick = async () => {
+    const cuit = $('#fc').value.replace(/\D/g, ''), pto = +$('#fp').value;
+    if (cuit.length != 11) return say('El CUIT tiene que tener 11 números.');
+    if (!$('#fn').value.trim() || !(pto > 0)) return say('Completá la razón social y el punto de venta.');
+    if ($('#fe').value == 'produccion' && !confirm('Producción emite facturas REALES ante ARCA. ¿Seguro?')) return;
+    const { error } = await sb.from('fiscal_settings').upsert({
+      business_id: S.bid, cuit, legal_name: $('#fn').value.trim(), iva_condition: $('#fi').value,
+      pto_vta: pto, env: $('#fe').value, updated_at: new Date().toISOString()
+    }, { onConflict: 'business_id' });
+    if (error) return say(error.message);
+    say('Datos fiscales guardados.'); facturacionView();
+  };
+  if (!f) return;
+  $('#fk').onclick = async () => {
+    if (st.has_key && !confirm('Ya hay una clave generada. Hacer otra anula el certificado actual. ¿Seguir?')) return;
+    try {
+      const r = await fiscal({ action: 'csr' });
+      $('#fq').value = r.csr;
+      say('Copiá el texto y subilo en ARCA > Administración de Certificados Digitales. Bajá el .crt y pegalo abajo.');
+    } catch (e) { say(e.message); }
+  };
+  $('#fcs').onclick = async () => {
+    try {
+      await fiscal({ action: 'cert', certificate: $('#fcrt').value });
+      say('Certificado guardado.'); facturacionView();
+    } catch (e) { say(e.message); }
   };
 }
 
