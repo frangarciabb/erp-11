@@ -433,7 +433,7 @@ async function cuentaView(id) {
 
 /* ---------- Facturación electrónica (ARCA) ---------- */
 async function fiscal(body) {
-  const { data, error } = await sb.functions.invoke('fiscal', { body: { business_id: S.bid, ...body } });
+  const { data, error } = await sb.functions.invoke('smooth-task', { body: { business_id: S.bid, ...body } });
   if (error) {
     let m = error.message;
     try { m = (await error.context.json()).error || m; } catch (_) {}
