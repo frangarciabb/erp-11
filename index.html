@@ -41,6 +41,7 @@ nav button.on{background:#f2f2f2}
 <body>
 <main><div id="app"></div><div id="msg"></div></main>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
 <script>
 const sb = supabase.createClient(
   'https://foxzcnctjohuqtoonpfb.supabase.co',
@@ -323,7 +324,7 @@ async function ventasView(d = new Date().toLocaleDateString('sv-SE')) {
       <a class="b" href="https://www.arca.gob.ar" target="_blank" rel="noopener">Portal de ARCA</a></div>`;
   $('#vd').onchange = e => e.target.value && ventasView(e.target.value);
   const a = new Date(d + 'T00:00:00'), z = new Date(a.getTime() + 864e5);
-  const { data, error } = await sb.from('sales').select('id,total,returned_total,currency,status,on_account,created_at,customers(name),sale_items(id,description,qty,returned_qty),invoices(cbte_tipo,pto_vta,numero,cae,env)')
+  const { data, error } = await sb.from('sales').select('id,total,returned_total,currency,status,on_account,created_at,customers(name,tax_id,iva_cond),sale_items(id,description,qty,returned_qty,unit_price),invoices(cbte_tipo,pto_vta,numero,cae,cae_vto,importe_total,currency,cotizacion,env,created_at)')
     .eq('business_id', S.bid).gte('created_at', a.toISOString()).lt('created_at', z.toISOString()).order('created_at', { ascending: false });
   if (error) return ($('#vs').textContent = error.message);
   const tot = {}, pr = {};
@@ -341,7 +342,7 @@ async function ventasView(d = new Date().toLocaleDateString('sv-SE')) {
         <span class="t"${act ? '' : ' style="text-decoration:line-through"'}>${mon(x.currency)}${fmt(+x.total - +x.returned_total)}</span></div></summary>
         ${x.sale_items.map(i => `<div class="r"><span>${esc(i.description)} x${i.qty}${+i.returned_qty ? ` <span class="m">(devueltos ${i.returned_qty})</span>` : ''}</span>
           ${act && i.qty > i.returned_qty ? `<input class="rq" data-i="${i.id}" type="number" step="any" min="0" max="${i.qty - i.returned_qty}" placeholder="Devolver" style="width:96px">` : ''}</div>`).join('')}
-        ${x.invoices.length ? `<div class="m">Factura ${TC[x.invoices[0].cbte_tipo]} ${String(x.invoices[0].pto_vta).padStart(4, '0')}-${String(x.invoices[0].numero).padStart(8, '0')} | CAE ${x.invoices[0].cae}${x.invoices[0].env == 'homologacion' ? ' (PRUEBA)' : ''}</div>` : act && S.role != 'seller' ? '<button class="s fa">Facturar</button>' : ''}
+        ${x.invoices.length ? `<div class="m">Factura ${TC[x.invoices[0].cbte_tipo]} ${String(x.invoices[0].pto_vta).padStart(4, '0')}-${String(x.invoices[0].numero).padStart(8, '0')} | CAE ${x.invoices[0].cae}${x.invoices[0].env == 'homologacion' ? ' (PRUEBA)' : ''}</div><button class="s pf">Imprimir factura</button>` : act && S.role != 'seller' ? '<button class="s fa">Facturar</button>' : ''}
         ${act ? `<div class="g"><button class="s rt">Devolver lo indicado</button>${S.role != 'seller' && !x.invoices.length ? '<button class="s an">Anular venta</button>' : ''}</div>` : ''}</details>`;
     }).join('')
     + (nact ? `<p class="t">Productos vendidos</p>` + Object.entries(pr).filter(e => e[1] > 0).sort((u, w) => w[1] - u[1]).map(([n, q]) => `<div class="r c"><span>${esc(n)}</span><span class="t">${q}</span></div>`).join('')
@@ -374,6 +375,49 @@ async function ventasView(d = new Date().toLocaleDateString('sv-SE')) {
       say(`Factura ${r.numero_fmt} emitida. CAE ${r.cae}${r.env == 'homologacion' ? ' (prueba, sin validez)' : ''}`); ventasView(d);
     } catch (e) { say(e.message); b.disabled = false; }
   });
+  document.querySelectorAll('#vs .pf').forEach(b => b.onclick = async () => {
+    const w = window.open('', '_blank');
+    if (!w) return say('El navegador bloqueó la ventana. Permití las ventanas emergentes.');
+    const sale = data.find(x => x.id == b.closest('details').dataset.s);
+    const { data: f, error } = await sb.from('fiscal_settings').select('*').eq('business_id', S.bid).single();
+    if (error) { w.close(); return say(error.message); }
+    imprimirFactura(w, sale, sale.invoices[0], f);
+  });
+}
+
+/* ---------- Hoja de la factura (con QR de ARCA) ---------- */
+function imprimirFactura(w, sale, inv, f) {
+  const L = TC[inv.cbte_tipo], usd = inv.currency == 'USD', M = mon(inv.currency), cu = sale.customers;
+  const total = +inv.importe_total, neto = L == 'C' ? total : +(total / 1.21).toFixed(2), iva = +(total - neto).toFixed(2), k = L == 'A' ? 1.21 : 1;
+  const dn = String(cu?.tax_id || '').replace(/\D/g, ''), dt = dn.length == 11 ? 80 : dn.length >= 7 && dn.length <= 8 ? 96 : 99;
+  const fec = new Date(new Date(inv.created_at).getTime() - 3 * 3600e3).toISOString().slice(0, 10);
+  const dmy = d => d.split('-').reverse().join('/');
+  const items = sale.sale_items.map(i => ({ ...i, q: +i.qty - +i.returned_qty })).filter(i => i.q > 0);
+  const desc = +(items.reduce((t, i) => t + i.q * +i.unit_price, 0) - total).toFixed(2);
+  const nro = `${String(inv.pto_vta).padStart(4, '0')}-${String(inv.numero).padStart(8, '0')}`;
+  const IVAC = { 1: 'IVA Responsable Inscripto', 5: 'Consumidor Final', 6: 'Responsable Monotributo' };
+  const qr = qrcode(0, 'M');
+  qr.addData('https://www.afip.gob.ar/fe/qr/?p=' + btoa(JSON.stringify({
+    ver: 1, fecha: fec, cuit: +f.cuit, ptoVta: inv.pto_vta, tipoCmp: inv.cbte_tipo, nroCmp: inv.numero, importe: total,
+    moneda: usd ? 'DOL' : 'PES', ctz: +inv.cotizacion || 1, tipoDocRec: dt, nroDocRec: dt == 99 ? 0 : +dn, tipoCodAut: 'E', codAut: +inv.cae
+  })));
+  qr.make();
+  const dsc = desc > 0 ? `<tr><td>Descuento</td><td class="n">-${M}${fmt(desc / k)}</td></tr>` : '';
+  const extra = L == 'A' ? `<tr><td>Importe neto gravado</td><td class="n">${M}${fmt(neto)}</td></tr><tr><td>IVA 21%</td><td class="n">${M}${fmt(iva)}</td></tr>` : '';
+  w.document.write(`<!doctype html><meta charset="utf-8"><title>Factura ${L} ${nro}</title>
+    <style>body{font:13px Arial,sans-serif;margin:24px;color:#111}table{width:100%;border-collapse:collapse}.h td{vertical-align:top;padding:10px;border:1px solid #111}.l{width:12%;text-align:center}.l b{font-size:44px;display:block;line-height:1}.n{text-align:right}.it th,.it td{padding:6px;border-bottom:1px solid #ccc;text-align:left}.it th{background:#eee}.it .n{text-align:right}.tt td{padding:4px 6px}.w{position:fixed;top:38%;left:6%;font-size:62px;color:rgba(192,57,43,.14);transform:rotate(-18deg);font-weight:bold}</style>
+    ${inv.env == 'homologacion' ? '<div class="w">PRUEBA - SIN VALIDEZ FISCAL</div>' : ''}
+    <table class="h"><tr><td style="width:44%"><div style="font-size:20px;font-weight:bold">${esc(f.legal_name)}</div>Condición frente al IVA: ${f.iva_condition == 'monotributo' ? 'Responsable Monotributo' : 'IVA Responsable Inscripto'}<br>CUIT: ${f.cuit}</td>
+      <td class="l"><b>${L}</b>Cód. ${String(inv.cbte_tipo).padStart(3, '0')}</td>
+      <td><div style="font-size:20px;font-weight:bold">FACTURA</div>N° ${nro}<br>Fecha de emisión: ${dmy(fec)}<br>CUIT: ${f.cuit}</td></tr></table>
+    <p>Cliente: <b>${esc(cu?.name || 'Consumidor Final')}</b>${dn ? ` | ${dt == 80 ? 'CUIT' : 'DNI'}: ${dn}` : ''}<br>Condición frente al IVA: ${IVAC[cu?.iva_cond ?? 5]}<br>Moneda: ${MN[inv.currency]}${usd ? ' | Cotización: ' + inv.cotizacion : ''}</p>
+    <table class="it"><tr><th>Descripción</th><th class="n">Cant.</th><th class="n">Precio unit.</th><th class="n">Subtotal</th></tr>
+    ${items.map(i => `<tr><td>${esc(i.description)}</td><td class="n">${i.q}</td><td class="n">${M}${fmt(i.unit_price / k)}</td><td class="n">${M}${fmt(i.q * i.unit_price / k)}</td></tr>`).join('')}</table>
+    <table class="tt" style="width:46%;margin:12px 0 0 auto">${dsc}${extra}<tr><td><b>Importe total</b></td><td class="n"><b>${M}${fmt(total)}</b></td></tr></table>
+    ${L == 'B' ? `<p>Régimen de Transparencia Fiscal al Consumidor (Ley 27.743) - IVA contenido: ${M}${fmt(iva)}</p>` : ''}
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:18px"><div>${qr.createSvgTag(3, 0)}</div>
+      <div class="n"><b>Comprobante autorizado</b><br><b>CAE N°:</b> ${inv.cae}<br><b>Vto. CAE:</b> ${inv.cae_vto ? dmy(inv.cae_vto) : ''}</div></div>`);
+  w.document.close(); w.focus(); setTimeout(() => w.print(), 400);
 }
 
 /* ---------- Clientes y cuenta corriente ---------- */
