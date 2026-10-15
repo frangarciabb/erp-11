@@ -54,7 +54,7 @@ const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '
 const fmt = n => Number(n).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const mon = c => c == 'USD' ? 'US$ ' : '$';
 const MN = { ARS: 'Pesos argentinos (ARS)', USD: 'Dólares estadounidenses (USD)' };
-const TC = { 1: 'A', 6: 'B', 11: 'C' };
+const TC = { 1: 'A', 6: 'B', 11: 'C', 3: 'A', 8: 'B', 13: 'C' };
 const num = s => {
   s = String(s ?? '').trim().replace(/[$\s]/g, '');
   if (s.includes(',')) s = s.replace(/\./g, '').replace(',', '.');
@@ -324,7 +324,7 @@ async function ventasView(d = new Date().toLocaleDateString('sv-SE')) {
       <a class="b" href="https://www.arca.gob.ar" target="_blank" rel="noopener">Portal de ARCA</a></div>`;
   $('#vd').onchange = e => e.target.value && ventasView(e.target.value);
   const a = new Date(d + 'T00:00:00'), z = new Date(a.getTime() + 864e5);
-  const { data, error } = await sb.from('sales').select('id,total,returned_total,currency,status,on_account,created_at,customers(name,tax_id,iva_cond),sale_items(id,description,qty,returned_qty,unit_price),invoices(cbte_tipo,pto_vta,numero,cae,cae_vto,importe_total,currency,cotizacion,env,created_at)')
+  const { data, error } = await sb.from('sales').select('id,total,returned_total,currency,status,on_account,created_at,customers(name,tax_id,iva_cond),sale_items(id,description,qty,returned_qty,unit_price),invoices(id,credit_of,cbte_tipo,pto_vta,numero,cae,cae_vto,importe_total,currency,cotizacion,env,created_at)')
     .eq('business_id', S.bid).gte('created_at', a.toISOString()).lt('created_at', z.toISOString()).order('created_at', { ascending: false });
   if (error) return ($('#vs').textContent = error.message);
   const tot = {}, pr = {};
@@ -342,8 +342,8 @@ async function ventasView(d = new Date().toLocaleDateString('sv-SE')) {
         <span class="t"${act ? '' : ' style="text-decoration:line-through"'}>${mon(x.currency)}${fmt(+x.total - +x.returned_total)}</span></div></summary>
         ${x.sale_items.map(i => `<div class="r"><span>${esc(i.description)} x${i.qty}${+i.returned_qty ? ` <span class="m">(devueltos ${i.returned_qty})</span>` : ''}</span>
           ${act && i.qty > i.returned_qty ? `<input class="rq" data-i="${i.id}" type="number" step="any" min="0" max="${i.qty - i.returned_qty}" placeholder="Devolver" style="width:96px">` : ''}</div>`).join('')}
-        ${x.invoices.length ? `<div class="m">Factura ${TC[x.invoices[0].cbte_tipo]} ${String(x.invoices[0].pto_vta).padStart(4, '0')}-${String(x.invoices[0].numero).padStart(8, '0')} | CAE ${x.invoices[0].cae}${x.invoices[0].env == 'homologacion' ? ' (PRUEBA)' : ''}</div><button class="s pf">Imprimir factura</button>` : act && S.role != 'seller' ? '<button class="s fa">Facturar</button>' : ''}
-        ${act ? `<div class="g"><button class="s rt">Devolver lo indicado</button>${S.role != 'seller' && !x.invoices.length ? '<button class="s an">Anular venta</button>' : ''}</div>` : ''}</details>`;
+        ${x.invoices.map(v => `<div class="m">${v.credit_of ? 'Nota de crédito' : 'Factura'} ${TC[v.cbte_tipo]} ${String(v.pto_vta).padStart(4, '0')}-${String(v.numero).padStart(8, '0')} | CAE ${v.cae}${v.env == 'homologacion' ? ' (PRUEBA)' : ''}</div><button class="s pf" data-v="${v.id}">Imprimir</button>`).join('')}${(() => { const fa = x.invoices.find(v => !v.credit_of); return !fa ? (act && S.role != 'seller' ? '<button class="s fa">Facturar</button>' : '') : x.invoices.some(v => v.credit_of == fa.id) || S.role == 'seller' ? '' : '<button class="s nc">Emitir nota de crédito</button>'; })()}
+        ${act ? `<div class="g"><button class="s rt">Devolver lo indicado</button>${S.role != 'seller' && (!x.invoices.some(v => !v.credit_of) || x.invoices.some(v => v.credit_of)) ? '<button class="s an">Anular venta</button>' : ''}</div>` : ''}</details>`;
     }).join('')
     + (nact ? `<p class="t">Productos vendidos</p>` + Object.entries(pr).filter(e => e[1] > 0).sort((u, w) => w[1] - u[1]).map(([n, q]) => `<div class="r c"><span>${esc(n)}</span><span class="t">${q}</span></div>`).join('')
       : '<p class="m">No hay ventas activas en esta fecha.</p>');
@@ -381,13 +381,23 @@ async function ventasView(d = new Date().toLocaleDateString('sv-SE')) {
     const sale = data.find(x => x.id == b.closest('details').dataset.s);
     const { data: f, error } = await sb.from('fiscal_settings').select('*').eq('business_id', S.bid).single();
     if (error) { w.close(); return say(error.message); }
-    imprimirFactura(w, sale, sale.invoices[0], f);
+    imprimirFactura(w, sale, sale.invoices.find(v => v.id == b.dataset.v), f);
+  });
+  document.querySelectorAll('#vs .nc').forEach(b => b.onclick = async () => {
+    const dt = b.closest('details'), sale = data.find(x => x.id == dt.dataset.s), fa = sale.invoices.find(v => !v.credit_of);
+    if (!confirm('¿Emitir la nota de crédito que anula por completo la factura ' + TC[fa.cbte_tipo] + ' ' + String(fa.pto_vta).padStart(4, '0') + '-' + String(fa.numero).padStart(8, '0') + '?')) return;
+    say('Pidiendo el CAE a ARCA…'); b.disabled = true;
+    try {
+      const r = await fiscal({ action: 'credit', invoice_id: fa.id });
+      say(`Nota de crédito ${r.numero_fmt} emitida. CAE ${r.cae}${r.env == 'homologacion' ? ' (prueba, sin validez)' : ''}. Ahora podés anular la venta.`); ventasView(d);
+    } catch (e) { say(e.message); b.disabled = false; }
   });
 }
 
 /* ---------- Hoja de la factura (con QR de ARCA) ---------- */
 function imprimirFactura(w, sale, inv, f) {
-  const L = TC[inv.cbte_tipo], usd = inv.currency == 'USD', M = mon(inv.currency), cu = sale.customers;
+  const L = TC[inv.cbte_tipo], usd = inv.currency == 'USD', M = mon(inv.currency), cu = sale.customers, isNC = !!inv.credit_of;
+  const ori = isNC ? sale.invoices.find(v => v.id == inv.credit_of) : null;
   const total = +inv.importe_total, neto = L == 'C' ? total : +(total / 1.21).toFixed(2), iva = +(total - neto).toFixed(2), k = L == 'A' ? 1.21 : 1;
   const dn = String(cu?.tax_id || '').replace(/\D/g, ''), dt = dn.length == 11 ? 80 : dn.length >= 7 && dn.length <= 8 ? 96 : 99;
   const fec = new Date(new Date(inv.created_at).getTime() - 3 * 3600e3).toISOString().slice(0, 10);
@@ -404,12 +414,13 @@ function imprimirFactura(w, sale, inv, f) {
   qr.make();
   const dsc = desc > 0 ? `<tr><td>Descuento</td><td class="n">-${M}${fmt(desc / k)}</td></tr>` : '';
   const extra = L == 'A' ? `<tr><td>Importe neto gravado</td><td class="n">${M}${fmt(neto)}</td></tr><tr><td>IVA 21%</td><td class="n">${M}${fmt(iva)}</td></tr>` : '';
-  w.document.write(`<!doctype html><meta charset="utf-8"><title>Factura ${L} ${nro}</title>
+  w.document.write(`<!doctype html><meta charset="utf-8"><title>${isNC ? 'Nota de crédito' : 'Factura'} ${L} ${nro}</title>
     <style>body{font:13px Arial,sans-serif;margin:24px;color:#111}table{width:100%;border-collapse:collapse}.h td{vertical-align:top;padding:10px;border:1px solid #111}.l{width:12%;text-align:center}.l b{font-size:44px;display:block;line-height:1}.n{text-align:right}.it th,.it td{padding:6px;border-bottom:1px solid #ccc;text-align:left}.it th{background:#eee}.it .n{text-align:right}.tt td{padding:4px 6px}.w{position:fixed;top:38%;left:6%;font-size:62px;color:rgba(192,57,43,.14);transform:rotate(-18deg);font-weight:bold}</style>
     ${inv.env == 'homologacion' ? '<div class="w">PRUEBA - SIN VALIDEZ FISCAL</div>' : ''}
-    <table class="h"><tr><td style="width:44%"><div style="font-size:20px;font-weight:bold">${esc(f.legal_name)}</div>Condición frente al IVA: ${f.iva_condition == 'monotributo' ? 'Responsable Monotributo' : 'IVA Responsable Inscripto'}<br>CUIT: ${f.cuit}</td>
+    <table class="h"><tr><td style="width:44%"><div style="font-size:20px;font-weight:bold">${esc(f.legal_name)}</div>Condición frente al IVA: ${f.iva_condition == 'monotributo' ? 'Responsable Monotributo' : 'IVA Responsable Inscripto'}<br>CUIT: ${f.cuit}<br>Domicilio comercial: ${esc(f.address || '')}<br>Ingresos Brutos: ${esc(f.iibb || '')}<br>Inicio de actividades: ${f.activity_start ? dmy(f.activity_start) : ''}</td>
       <td class="l"><b>${L}</b>Cód. ${String(inv.cbte_tipo).padStart(3, '0')}</td>
-      <td><div style="font-size:20px;font-weight:bold">FACTURA</div>N° ${nro}<br>Fecha de emisión: ${dmy(fec)}<br>CUIT: ${f.cuit}</td></tr></table>
+      <td><div style="font-size:20px;font-weight:bold">${isNC ? 'NOTA DE CRÉDITO' : 'FACTURA'}</div>N° ${nro}<br>Fecha de emisión: ${dmy(fec)}<br>CUIT: ${f.cuit}</td></tr></table>
+    ${ori ? `<p>Comprobante asociado: Factura ${TC[ori.cbte_tipo]} ${String(ori.pto_vta).padStart(4, '0')}-${String(ori.numero).padStart(8, '0')}</p>` : ''}
     <p>Cliente: <b>${esc(cu?.name || 'Consumidor Final')}</b>${dn ? ` | ${dt == 80 ? 'CUIT' : 'DNI'}: ${dn}` : ''}<br>Condición frente al IVA: ${IVAC[cu?.iva_cond ?? 5]}<br>Moneda: ${MN[inv.currency]}${usd ? ' | Cotización: ' + inv.cotizacion : ''}</p>
     <table class="it"><tr><th>Descripción</th><th class="n">Cant.</th><th class="n">Precio unit.</th><th class="n">Subtotal</th></tr>
     ${items.map(i => `<tr><td>${esc(i.description)}</td><td class="n">${i.q}</td><td class="n">${M}${fmt(i.unit_price / k)}</td><td class="n">${M}${fmt(i.q * i.unit_price / k)}</td></tr>`).join('')}</table>
@@ -495,6 +506,9 @@ async function facturacionView() {
     <input id="fn" placeholder="Razón social o nombre" value="${esc(f?.legal_name || '')}">
     <select id="fi"><option value="monotributo"${f?.iva_condition == 'monotributo' ? ' selected' : ''}>Monotributista (Factura C)</option><option value="inscripto"${f?.iva_condition == 'inscripto' ? ' selected' : ''}>Responsable Inscripto (Factura A o B)</option></select>
     <input id="fp" type="number" min="1" placeholder="Punto de venta (ej: 1)" value="${f?.pto_vta || ''}">
+    <input id="fa2" placeholder="Domicilio comercial" value="${esc(f?.address || '')}">
+    <input id="fb" placeholder="Ingresos Brutos (número, o Exento)" value="${esc(f?.iibb || '')}">
+    <label class="m">Inicio de actividades</label><input id="fd" type="date" value="${f?.activity_start || ''}">
     <select id="fe"><option value="homologacion"${f?.env != 'produccion' ? ' selected' : ''}>Ambiente: Pruebas</option><option value="produccion"${f?.env == 'produccion' ? ' selected' : ''}>Ambiente: Producción (facturas reales)</option></select>
     <button id="fs">Guardar datos fiscales</button>
     ${f ? `<div class="c"><b>Certificado digital</b>
@@ -507,10 +521,11 @@ async function facturacionView() {
     const cuit = $('#fc').value.replace(/\D/g, ''), pto = +$('#fp').value;
     if (cuit.length != 11) return say('El CUIT tiene que tener 11 números.');
     if (!$('#fn').value.trim() || !(pto > 0)) return say('Completá la razón social y el punto de venta.');
+    if ($('#fe').value == 'produccion' && (!$('#fa2').value.trim() || !$('#fd').value)) return say('Para producción cargá el domicilio comercial y el inicio de actividades.');
     if ($('#fe').value == 'produccion' && !confirm('Producción emite facturas REALES ante ARCA. ¿Seguro?')) return;
     const { error } = await sb.from('fiscal_settings').upsert({
       business_id: S.bid, cuit, legal_name: $('#fn').value.trim(), iva_condition: $('#fi').value,
-      pto_vta: pto, env: $('#fe').value, updated_at: new Date().toISOString()
+      pto_vta: pto, env: $('#fe').value, address: $('#fa2').value.trim() || null, iibb: $('#fb').value.trim() || null, activity_start: $('#fd').value || null, updated_at: new Date().toISOString()
     }, { onConflict: 'business_id' });
     if (error) return say(error.message);
     say('Datos fiscales guardados.'); facturacionView();
