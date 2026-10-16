@@ -54,6 +54,7 @@ const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '
 const fmt = n => Number(n).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const mon = c => c == 'USD' ? 'US$ ' : '$';
 const MN = { ARS: 'Pesos argentinos (ARS)', USD: 'Dólares estadounidenses (USD)' };
+const TERMS_V = '2026-10';
 const TC = { 1: 'A', 6: 'B', 11: 'C', 3: 'A', 8: 'B', 13: 'C' };
 const num = s => {
   s = String(s ?? '').trim().replace(/[$\s]/g, '');
@@ -70,7 +71,8 @@ function authView() {
   $('#app').innerHTML = `<h1>ERP Once</h1>
     <input id="em" type="email" placeholder="Email" autocomplete="email">
     <input id="pw" type="password" placeholder="Contraseña (mínimo 6 caracteres)" autocomplete="current-password">
-    <button id="li">Ingresar</button><button class="s" id="su">Crear cuenta</button>`;
+    <button id="li">Ingresar</button><button class="s" id="su">Crear cuenta</button>
+    <p class="m">Al crear una cuenta aceptás los <a href="terminos.html" target="_blank" rel="noopener">Términos y Condiciones y la Política de Privacidad</a>.</p>`;
   $('#li').onclick = () => auth('signInWithPassword');
   $('#su').onclick = () => auth('signUp');
 }
@@ -84,6 +86,8 @@ async function auth(fn) {
 
 /* ---------- Comercio ---------- */
 async function load() {
+  const ac = await sb.from('terms_acceptances').select('version').eq('version', TERMS_V).limit(1);
+  if (!ac.error && !ac.data.length) return termsView();
   const { data, error } = await sb.from('members').select('business_id,role,businesses(name)').limit(1);
   if (error) return say(error.message);
   if (!data.length) return bizView();
@@ -92,6 +96,20 @@ async function load() {
   S.lists = l.data || [];
   await loadWhs();
   shell();
+}
+function termsView() {
+  $('#app').innerHTML = `<h1>Términos y condiciones</h1><p class="m">Antes de seguir, leé y aceptá los Términos y Condiciones y la Política de Privacidad.</p>
+    <a class="b" href="terminos.html" target="_blank" rel="noopener">Leer los términos y la política de privacidad</a>
+    <label class="m" style="display:flex;gap:8px;align-items:center;margin:12px 0"><input type="checkbox" id="tk" style="width:auto;margin:0"> Leí y acepto</label>
+    <button id="tb">Continuar</button><button class="s" id="to">Salir</button>`;
+  $('#to').onclick = async () => { await sb.auth.signOut(); say(); authView(); };
+  $('#tb').onclick = async () => {
+    if (!$('#tk').checked) return say('Tenés que aceptar para continuar.');
+    const u = (await sb.auth.getUser()).data.user;
+    const { error } = await sb.from('terms_acceptances').insert({ user_id: u.id, version: TERMS_V });
+    if (error) return say(error.message);
+    say(); load();
+  };
 }
 function bizView() {
   $('#app').innerHTML = `<h1>Creá tu comercio</h1><input id="bn" placeholder="Nombre del comercio"><button id="bc">Crear comercio</button><p class="m">Si trabajás en un comercio que ya usa el sistema, pedile al dueño que te agregue con tu email y tocá Actualizar.</p><button class="s" id="br">Actualizar</button>`;
@@ -456,10 +474,11 @@ async function clientesView() {
 
 async function cuentaView(id) {
   const [cr, sr, pr] = await Promise.all([
-    sb.from('customers').select('name').eq('id', id).single(),
+    sb.from('customers').select('name,phone,email,tax_id,iva_cond,address').eq('id', id).single(),
     sb.from('sales').select('total,returned_total,currency,created_at,status').eq('customer_id', id).eq('on_account', true).order('created_at', { ascending: false }).limit(100),
     sb.from('payments').select('amount,currency,method,created_at').eq('customer_id', id).order('created_at', { ascending: false }).limit(100)
   ]);
+  const cd = cr.data || {};
   const mv = [
     ...(sr.data || []).filter(x => x.status == 'activa').map(x => ({ d: x.created_at, t: 'Venta a cuenta', a: +x.total - +x.returned_total, c: x.currency })),
     ...(pr.data || []).map(x => ({ d: x.created_at, t: `Cobro (${x.method})`, a: -x.amount, c: x.currency }))
@@ -470,6 +489,11 @@ async function cuentaView(id) {
   $('#v').innerHTML = `<div class="r"><button class="s" id="bk2">Volver</button></div>
     <div class="t" style="font-size:26px;margin-top:8px">${esc(cr.data?.name || '')}</div>
     <div class="c"><span class="m">Saldo (lo que debe)</span><div class="t" style="font-size:24px">${st}</div></div>
+    <details class="c"><summary class="t">Editar datos del cliente</summary>
+      <input id="en" placeholder="Nombre" value="${esc(cd.name || '')}"><input id="ep" placeholder="WhatsApp" value="${esc(cd.phone || '')}">
+      <input id="ee" type="email" placeholder="Email" value="${esc(cd.email || '')}"><input id="et" placeholder="CUIT o DNI" value="${esc(cd.tax_id || '')}">
+      <select id="ei"><option value="5"${cd.iva_cond == 5 ? ' selected' : ''}>Consumidor final</option><option value="1"${cd.iva_cond == 1 ? ' selected' : ''}>Responsable inscripto</option><option value="6"${cd.iva_cond == 6 ? ' selected' : ''}>Monotributista</option></select>
+      <input id="ea" placeholder="Domicilio" value="${esc(cd.address || '')}"><button id="es">Guardar cambios</button></details>
     <details class="c"><summary class="t">Registrar cobro</summary>
       <input id="pa" type="number" step="any" min="0" placeholder="Monto">
       <select id="pc"><option value="ARS">Pesos</option><option value="USD">Dólares</option></select>
@@ -477,6 +501,16 @@ async function cuentaView(id) {
       <button id="ps">Guardar cobro</button></details>
     ${mv.map(m => `<div class="c r"><span>${new Date(m.d).toLocaleDateString('es-AR')} <span class="m">${m.t}</span></span><span class="t">${m.a < 0 ? '-' : ''}${mon(m.c)}${fmt(Math.abs(m.a))}</span></div>`).join('') || '<p class="m">Sin movimientos.</p>'}`;
   $('#bk2').onclick = clientesView;
+  $('#es').onclick = async () => {
+    const name = $('#en').value.trim();
+    if (!name) return say('El nombre no puede quedar vacío.');
+    const { error } = await sb.from('customers').update({
+      name, phone: $('#ep').value.trim() || null, email: $('#ee').value.trim() || null,
+      tax_id: $('#et').value.trim() || null, iva_cond: +$('#ei').value, address: $('#ea').value.trim() || null
+    }).eq('id', id);
+    if (error) return say(error.message);
+    say('Cliente actualizado.'); cuentaView(id);
+  };
   $('#ps').onclick = async () => {
     const amount = +$('#pa').value;
     if (!(amount > 0)) return say('Escribí el monto cobrado.');
