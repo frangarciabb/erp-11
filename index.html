@@ -130,7 +130,7 @@ async function loadWhs() {
 function shell() {
   const adm = S.role != 'seller';
   const tabs = [['prod', 'Productos'], ['stock', 'Stock'], ['quo', 'Presupuestos'], ['cli', 'Clientes'], ['ven', 'Ventas'],
-    ...(adm ? [['cmp', 'Compras'], ['imp', 'Importar'], ['pre', 'Precios'], ['aju', 'Ajustes'], ['fac', 'Facturación']] : [])];
+    ...(adm ? [['cmp', 'Compras'], ['caj', 'Caja'], ['rep', 'Reportes'], ['imp', 'Importar'], ['pre', 'Precios'], ['aju', 'Ajustes'], ['fac', 'Facturación']] : [])];
   if (!tabs.some(t => t[0] == S.tab)) S.tab = 'prod';
   $('#app').innerHTML = `<div class="sh"><div class="sd"><div class="r"><h1>${esc(S.bname)}</h1><button class="s" id="out">Salir</button></div>
     ${S.whs.length > 1 ? `<select id="wsel">${S.whs.map(w => `<option value="${w.id}"${w.id == S.wh ? ' selected' : ''}>Local: ${esc(w.name)}</option>`).join('')}</select>` : ''}
@@ -138,7 +138,7 @@ function shell() {
   $('#out').onclick = async () => { await sb.auth.signOut(); say(); authView(); };
   if ($('#wsel')) $('#wsel').onchange = e => { S.wh = e.target.value; try { localStorage.setItem('wh' + S.bid, S.wh); } catch (_) {} shell(); };
   document.querySelectorAll('nav button').forEach(b => b.onclick = () => { S.tab = b.dataset.t; say(); shell(); });
-  ({ prod: prodView, stock: stockView, quo: quoView, cli: clientesView, ven: ventasView, imp: impView, pre: preView, aju: ajustesView, fac: facturacionView, cmp: comprasView })[S.tab]();
+  ({ prod: prodView, stock: stockView, quo: quoView, cli: clientesView, ven: ventasView, imp: impView, pre: preView, aju: ajustesView, fac: facturacionView, cmp: comprasView, caj: cajaView, rep: reportesView })[S.tab]();
 }
 
 /* ---------- Alta de productos (una o muchas filas) ---------- */
@@ -298,8 +298,8 @@ async function pg(mk) {
   }
 }
 async function catalog() {
-  const d = await pg(() => sb.from('product_variants').select('id,products(name,code,cost),prices(price,price_list_id,min_qty)').eq('business_id', S.bid).order('id'));
-  return (S.cat = d.map(v => ({ id: v.id, name: v.products.name, code: v.products.code || '', cost: +v.products.cost || 0, prices: v.prices }))
+  const d = await pg(() => sb.from('product_variants').select('id,products(name,code,cost,cost_currency),prices(price,price_list_id,min_qty)').eq('business_id', S.bid).order('id'));
+  return (S.cat = d.map(v => ({ id: v.id, name: v.products.name, code: v.products.code || '', cost: +v.products.cost || 0, cc: v.products.cost_currency || 'ARS', prices: v.prices }))
     .sort((a, b) => a.name.localeCompare(b.name)));
 }
 const priceOf = (v, list, q) => {
@@ -707,6 +707,109 @@ async function proveedorView(id) {
     if (error) return say(error.message);
     say('Pago registrado.'); proveedorView(id);
   };
+}
+
+/* ---------- Caja y reportes ---------- */
+const mx = o => Object.entries(o).filter(e => Math.abs(e[1]) > 0.004).map(([c, v]) => `${mon(c)}${fmt(v)}`).join(' | ') || `${mon('ARS')}${fmt(0)}`;
+const add = (o, k, v) => { o[k] = (o[k] || 0) + v; };
+
+async function cajaView(d = new Date().toLocaleDateString('sv-SE')) {
+  $('#v').innerHTML = `<button class="s" id="cal">Ver calendario del mes</button><input id="cd" type="date" value="${d}"><div id="cs2" class="m">Cargando…</div>
+    <details class="c"><summary class="t">+ Movimiento manual (gasto, retiro, ingreso)</summary>
+      <select id="mk"><option value="egreso">Egreso (sale plata)</option><option value="ingreso">Ingreso (entra plata)</option></select>
+      <input id="mc" placeholder="Concepto (ej: alquiler, sueldo, retiro)"><input id="ma" type="number" step="any" min="0" placeholder="Monto">
+      <div class="g"><select id="mn"><option value="ARS">Pesos</option><option value="USD">Dólares</option></select><select id="mt"><option>efectivo</option><option>transferencia</option><option>otro</option></select></div>
+      <button id="mg">Guardar movimiento</button><p class="m">Se registra con la fecha y hora de hoy.</p></details>`;
+  $('#cal').onclick = () => calendarioView(d.slice(0, 7));
+  $('#cd').onchange = e => e.target.value && cajaView(e.target.value);
+  $('#mg').onclick = async () => {
+    const amount = +$('#ma').value, concept = $('#mc').value.trim();
+    if (!concept || !(amount > 0)) return say('Completá el concepto y el monto.');
+    const { error } = await sb.from('cash_movements').insert({ business_id: S.bid, kind: $('#mk').value, concept, amount, currency: $('#mn').value, method: $('#mt').value });
+    if (error) return say(error.message);
+    say('Movimiento guardado.'); cajaView(new Date().toLocaleDateString('sv-SE'));
+  };
+  const a = new Date(d + 'T00:00:00'), z = new Date(a.getTime() + 864e5);
+  const rows = await pg(() => sb.from('cash_ledger').select('created_at,currency,concept,amount,method')
+    .eq('business_id', S.bid).gte('created_at', a.toISOString()).lt('created_at', z.toISOString()).order('created_at', { ascending: false }));
+  const ing = {}, egr = {}, net = {};
+  rows.forEach(r => { const v = +r.amount; add(v >= 0 ? ing : egr, r.currency, Math.abs(v)); add(net, r.currency, v); });
+  $('#cs2').className = '';
+  $('#cs2').innerHTML = `<div class="c"><span class="m">Balance del día</span><div class="t" style="font-size:28px">${mx(net)}</div>
+    <div class="m">Entró ${mx(ing)} | Salió ${mx(egr)}</div></div>`
+    + (rows.map(r => `<div class="r c"><span>${new Date(r.created_at).toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' })} ${esc(r.concept)} <span class="m">${esc(r.method)}</span></span>
+      <span class="t" style="color:${+r.amount < 0 ? '#c0392b' : '#1a7f37'}">${+r.amount < 0 ? '-' : '+'}${mon(r.currency)}${fmt(Math.abs(r.amount))}</span></div>`).join('') || '<p class="m">No hay movimientos en esta fecha.</p>');
+}
+
+async function calendarioView(ym = new Date().toLocaleDateString('sv-SE').slice(0, 7), cur = 'ARS') {
+  const [y, m] = ym.split('-').map(Number), a = new Date(y, m - 1, 1), z = new Date(y, m, 1);
+  $('#v').innerHTML = `<button class="s" id="bk6">Volver a la caja</button>
+    <div class="g"><input type="month" id="cm" value="${ym}"><select id="cc2"><option value="ARS"${cur == 'ARS' ? ' selected' : ''}>Pesos</option><option value="USD"${cur == 'USD' ? ' selected' : ''}>Dólares</option></select></div>
+    <div id="cg2" class="m">Cargando…</div>`;
+  $('#bk6').onclick = () => cajaView();
+  $('#cm').onchange = e => e.target.value && calendarioView(e.target.value, cur);
+  $('#cc2').onchange = e => calendarioView(ym, e.target.value);
+  const rows = await pg(() => sb.from('cash_ledger').select('created_at,amount').eq('business_id', S.bid).eq('currency', cur)
+    .gte('created_at', a.toISOString()).lt('created_at', z.toISOString()).order('created_at'));
+  const day = {};
+  rows.forEach(r => add(day, new Date(r.created_at).toLocaleDateString('sv-SE'), +r.amount));
+  const tot = Object.values(day).reduce((t, v) => t + v, 0), first = (a.getDay() + 6) % 7, n = new Date(y, m, 0).getDate();
+  const cp = v => Math.abs(v) >= 1e6 ? (v / 1e6).toFixed(1).replace('.', ',') + 'M' : Math.abs(v) >= 1e3 ? Math.round(v / 1e3) + 'k' : Math.round(v);
+  const cells = ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom'].map(x => `<div class="m" style="text-align:center">${x}</div>`);
+  for (let i = 0; i < first; i++) cells.push('<div></div>');
+  for (let k = 1; k <= n; k++) {
+    const key = `${ym}-${String(k).padStart(2, '0')}`, v = day[key];
+    cells.push(`<div data-d="${key}" style="border:1px solid var(--bd);border-radius:6px;padding:4px;min-height:54px;font-size:12px;cursor:pointer"><div class="m">${k}</div>${v === undefined ? '' : `<div style="font-weight:600;color:${v < 0 ? '#c0392b' : '#1a7f37'}">${v < 0 ? '-' : ''}${cp(Math.abs(v))}</div>`}</div>`);
+  }
+  $('#cg2').className = '';
+  $('#cg2').innerHTML = `<div class="c"><span class="m">Balance del mes</span><div class="t" style="font-size:26px">${mon(cur)}${fmt(tot)}</div></div>
+    <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:4px">${cells.join('')}</div><p class="m">Tocá un día para ver su detalle.</p>`;
+  document.querySelectorAll('[data-d]').forEach(c => c.onclick = () => cajaView(c.dataset.d));
+}
+
+async function reportesView(per = '30') {
+  $('#v').innerHTML = `<select id="rp"><option value="7"${per == '7' ? ' selected' : ''}>Últimos 7 días</option><option value="30"${per == '30' ? ' selected' : ''}>Últimos 30 días</option><option value="mes"${per == 'mes' ? ' selected' : ''}>Este mes</option><option value="ant"${per == 'ant' ? ' selected' : ''}>Mes anterior</option></select><div id="rs" class="m">Calculando…</div>`;
+  $('#rp').onchange = e => reportesView(e.target.value);
+  const h = new Date(); h.setHours(0, 0, 0, 0);
+  let z = new Date(h.getTime() + 864e5), a;
+  if (per == '7') a = new Date(z.getTime() - 7 * 864e5);
+  else if (per == '30') a = new Date(z.getTime() - 30 * 864e5);
+  else if (per == 'mes') a = new Date(h.getFullYear(), h.getMonth(), 1);
+  else { a = new Date(h.getFullYear(), h.getMonth() - 1, 1); z = new Date(h.getFullYear(), h.getMonth(), 1); }
+  if (!S.cat) await catalog();
+  const [sales, st, cb, pb] = await Promise.all([
+    pg(() => sb.from('sales').select('id,total,returned_total,currency,sale_items(variant_id,description,qty,returned_qty,unit_price)')
+      .eq('business_id', S.bid).eq('status', 'activa').gte('created_at', a.toISOString()).lt('created_at', z.toISOString()).order('created_at')),
+    pg(() => sb.from('stock_levels').select('variant_id,qty').eq('business_id', S.bid).order('variant_id').order('warehouse_id')),
+    pg(() => sb.from('customer_balances').select('currency,balance').eq('business_id', S.bid).order('customer_id').order('currency')),
+    pg(() => sb.from('supplier_balances').select('currency,balance').eq('business_id', S.bid).order('supplier_id').order('currency'))
+  ]);
+  const cat = {}; S.cat.forEach(v => { cat[v.id] = v; });
+  const vent = {}, cnt = {}, gan = {}, top = {}, avg = {}, val = {}, cob = {}, pag = {};
+  sales.forEach(s => {
+    add(vent, s.currency, +s.total - +s.returned_total); add(cnt, s.currency, 1);
+    s.sale_items.forEach(i => {
+      const q = +i.qty - +i.returned_qty;
+      if (q <= 0) return;
+      const t = top[i.description] = top[i.description] || { q: 0, m: {} };
+      t.q += q; add(t.m, s.currency, q * +i.unit_price);
+      const v = cat[i.variant_id];
+      if (v && v.cost > 0 && v.cc == s.currency) add(gan, s.currency, q * (+i.unit_price - v.cost));
+    });
+  });
+  Object.keys(vent).forEach(c => { avg[c] = vent[c] / cnt[c]; });
+  st.forEach(x => { const v = cat[x.variant_id]; if (v && +x.qty > 0) add(val, v.cc, +x.qty * v.cost); });
+  cb.forEach(x => { if (+x.balance > 0) add(cob, x.currency, +x.balance); });
+  pb.forEach(x => { if (+x.balance > 0) add(pag, x.currency, +x.balance); });
+  const nv = Object.values(cnt).reduce((t, x) => t + x, 0);
+  $('#rs').className = '';
+  $('#rs').innerHTML = `<div class="c"><span class="m">Ventas del período (${nv} ${nv == 1 ? 'venta' : 'ventas'})</span><div class="t" style="font-size:26px">${mx(vent)}</div><div class="m">Ticket promedio: ${mx(avg)}</div></div>
+    <div class="c"><span class="m">Ganancia estimada (con el costo actual de cada producto)</span><div class="t" style="font-size:22px">${mx(gan)}</div></div>
+    <p class="t">Más vendidos</p>
+    ${Object.entries(top).sort((u, w) => w[1].q - u[1].q).slice(0, 10).map(([n, t]) => `<div class="r c"><span>${esc(n)} <span class="m">x${t.q}</span></span><span class="t">${mx(t.m)}</span></div>`).join('') || '<p class="m">No hay ventas en este período.</p>'}
+    <div class="c"><span class="m">Te deben los clientes</span><div class="t" style="font-size:20px">${mx(cob)}</div></div>
+    <div class="c"><span class="m">Debés a proveedores</span><div class="t" style="font-size:20px">${mx(pag)}</div></div>
+    <div class="c"><span class="m">Stock valorizado, a costo (todos los locales)</span><div class="t" style="font-size:20px">${mx(val)}</div></div>`;
 }
 
 /* ---------- Ajustes: locales y usuarios ---------- */
