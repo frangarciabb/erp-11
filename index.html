@@ -42,6 +42,7 @@ nav button.on{background:#f2f2f2}
 <main><div id="app"></div><div id="msg"></div></main>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script>
 const sb = supabase.createClient(
   'https://foxzcnctjohuqtoonpfb.supabase.co',
@@ -235,15 +236,20 @@ function csv(t) {
 }
 function impView() {
   const cols = ['codigo', 'nombre', 'costo', 'unidades_por_bulto', 'stock', ...S.lists.map(l => 'precio_' + l.name.toLowerCase())];
-  $('#v').innerHTML = `<p class="m">Subí un archivo CSV (en Excel: Guardar como, CSV). Columnas:<br><b>${cols.join(', ')}</b><br>Solo "nombre" es obligatoria. Los precios van en la moneda de cada lista.</p>
-    <button class="s" id="tp">Descargar plantilla</button><input type="file" id="f" accept=".csv,text/csv"><div id="pv" class="m"></div>`;
+  $('#v').innerHTML = `<p class="m">Subí un archivo de Excel (.xlsx) o CSV. Columnas:<br><b>${cols.join(', ')}</b><br>Solo "nombre" es obligatoria. Los precios van en la moneda de cada lista.</p>
+    <button class="s" id="tp">Descargar plantilla</button><input type="file" id="f" accept=".xlsx,.xls,.csv,text/csv"><div id="pv" class="m"></div>`;
   $('#tp').onclick = () => {
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob(['\ufeff' + cols.join(',') + '\n'], { type: 'text/csv' }));
     a.download = 'plantilla_productos.csv'; a.click();
   };
   $('#f').onchange = async e => {
-    const rows = csv(await e.target.files[0].text());
+    const file = e.target.files[0];
+    let rows;
+    if (/\.xlsx?$/i.test(file.name)) {
+      const wb = XLSX.read(await file.arrayBuffer());
+      rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: '' }).map(r => r.map(c => String(c))).filter(r => r.some(x => x.trim()));
+    } else rows = csv(await file.text());
     const h = rows.shift().map(x => x.trim().toLowerCase());
     const ix = n => h.indexOf(n);
     if (ix('nombre') < 0) return ($('#pv').textContent = 'Falta la columna "nombre".');
@@ -450,16 +456,17 @@ function imprimirFactura(w, sale, inv, f) {
 }
 
 /* ---------- Clientes y cuenta corriente ---------- */
-async function clientesView() {
-  $('#v').innerHTML = `<details class="c"><summary class="t">+ Nuevo cliente</summary><input id="cn" placeholder="Nombre"><input id="cp" placeholder="WhatsApp (opcional)"><input id="ct" placeholder="CUIT o DNI (para facturar)"><select id="ci"><option value="5">Consumidor final</option><option value="1">Responsable inscripto</option><option value="6">Monotributista</option></select><button id="cs">Guardar cliente</button></details><div id="cl" class="m">Cargando…</div>`;
+async function clientesView(arch = false) {
+  $('#v').innerHTML = `<button class="s" id="ar">${arch ? 'Ver clientes activos' : 'Ver archivados'}</button><details class="c"><summary class="t">+ Nuevo cliente</summary><input id="cn" placeholder="Nombre"><input id="cp" placeholder="WhatsApp (opcional)"><input id="ct" placeholder="CUIT o DNI (para facturar)"><select id="ci"><option value="5">Consumidor final</option><option value="1">Responsable inscripto</option><option value="6">Monotributista</option></select><button id="cs">Guardar cliente</button></details><div id="cl" class="m">Cargando…</div>`;
   $('#cs').onclick = async () => {
     const name = $('#cn').value.trim();
     if (!name) return say('Falta el nombre del cliente.');
     const { error } = await sb.from('customers').insert({ business_id: S.bid, name, phone: $('#cp').value.trim() || null, tax_id: $('#ct').value.trim() || null, iva_cond: +$('#ci').value });
     error ? say(error.message) : clientesView();
   };
+  $('#ar').onclick = () => clientesView(!arch);
   const [cu, bl] = await Promise.all([
-    pg(() => sb.from('customers').select('id,name,phone').eq('business_id', S.bid).order('name')),
+    pg(() => sb.from('customers').select('id,name,phone').eq('business_id', S.bid).eq('archived', arch).order('name')),
     pg(() => sb.from('customer_balances').select('customer_id,currency,balance').eq('business_id', S.bid).order('customer_id').order('currency'))
   ]);
   const bal = {};
@@ -468,13 +475,13 @@ async function clientesView() {
   $('#cl').innerHTML = cu.map(c => {
     const t = (bal[c.id] || []).map(x => `${mon(x.currency)}${fmt(x.balance)}`).join(' | ');
     return `<div class="c" data-c="${c.id}" style="cursor:pointer"><div class="r"><span class="t">${esc(c.name)}</span><span class="t"${t ? ' style="color:#c0392b"' : ''}>${t || 'Al día'}</span></div><div class="m">${esc(c.phone || '')}</div></div>`;
-  }).join('') || '<p class="m">Todavía no hay clientes.</p>';
+  }).join('') || `<p class="m">${arch ? 'No hay clientes archivados.' : 'Todavía no hay clientes.'}</p>`;
   document.querySelectorAll('[data-c]').forEach(e => e.onclick = () => cuentaView(e.dataset.c));
 }
 
 async function cuentaView(id) {
   const [cr, sr, pr] = await Promise.all([
-    sb.from('customers').select('name,phone,email,tax_id,iva_cond,address').eq('id', id).single(),
+    sb.from('customers').select('name,phone,email,tax_id,iva_cond,address,archived').eq('id', id).single(),
     sb.from('sales').select('total,returned_total,currency,created_at,status').eq('customer_id', id).eq('on_account', true).order('created_at', { ascending: false }).limit(100),
     sb.from('payments').select('amount,currency,method,created_at').eq('customer_id', id).order('created_at', { ascending: false }).limit(100)
   ]);
@@ -485,7 +492,7 @@ async function cuentaView(id) {
   ].sort((a, b) => b.d.localeCompare(a.d));
   const bal = {};
   mv.forEach(m => { bal[m.c] = (bal[m.c] || 0) + m.a; });
-  const st = Object.entries(bal).filter(e => Math.abs(e[1]) > 0.004).map(([c, v]) => `${mon(c)}${fmt(v)}`).join(' | ') || 'Al día';
+  const st = Object.entries(bal).filter(e => Math.abs(e[1]) > 0.004).map(([c, v]) => v < 0 ? `a favor ${mon(c)}${fmt(-v)}` : `${mon(c)}${fmt(v)}`).join(' | ') || 'Al día';
   $('#v').innerHTML = `<div class="r"><button class="s" id="bk2">Volver</button></div>
     <div class="t" style="font-size:26px;margin-top:8px">${esc(cr.data?.name || '')}</div>
     <div class="c"><span class="m">Saldo (lo que debe)</span><div class="t" style="font-size:24px">${st}</div></div>
@@ -493,14 +500,14 @@ async function cuentaView(id) {
       <input id="en" placeholder="Nombre" value="${esc(cd.name || '')}"><input id="ep" placeholder="WhatsApp" value="${esc(cd.phone || '')}">
       <input id="ee" type="email" placeholder="Email" value="${esc(cd.email || '')}"><input id="et" placeholder="CUIT o DNI" value="${esc(cd.tax_id || '')}">
       <select id="ei"><option value="5"${cd.iva_cond == 5 ? ' selected' : ''}>Consumidor final</option><option value="1"${cd.iva_cond == 1 ? ' selected' : ''}>Responsable inscripto</option><option value="6"${cd.iva_cond == 6 ? ' selected' : ''}>Monotributista</option></select>
-      <input id="ea" placeholder="Domicilio" value="${esc(cd.address || '')}"><button id="es">Guardar cambios</button></details>
+      <input id="ea" placeholder="Domicilio" value="${esc(cd.address || '')}"><button id="es">Guardar cambios</button><button class="s" id="ac">${cd.archived ? 'Restaurar cliente' : 'Archivar cliente'}</button></details>
     <details class="c"><summary class="t">Registrar cobro</summary>
       <input id="pa" type="number" step="any" min="0" placeholder="Monto">
       <select id="pc"><option value="ARS">Pesos</option><option value="USD">Dólares</option></select>
       <select id="pm"><option>efectivo</option><option>transferencia</option><option>cheque</option><option>otro</option></select>
       <button id="ps">Guardar cobro</button></details>
     ${mv.map(m => `<div class="c r"><span>${new Date(m.d).toLocaleDateString('es-AR')} <span class="m">${m.t}</span></span><span class="t">${m.a < 0 ? '-' : ''}${mon(m.c)}${fmt(Math.abs(m.a))}</span></div>`).join('') || '<p class="m">Sin movimientos.</p>'}`;
-  $('#bk2').onclick = clientesView;
+  $('#bk2').onclick = () => clientesView();
   $('#es').onclick = async () => {
     const name = $('#en').value.trim();
     if (!name) return say('El nombre no puede quedar vacío.');
@@ -511,9 +518,17 @@ async function cuentaView(id) {
     if (error) return say(error.message);
     say('Cliente actualizado.'); cuentaView(id);
   };
+  $('#ac').onclick = async () => {
+    const debe = Object.values(bal).some(v => Math.abs(v) > 0.004);
+    if (!cd.archived && debe && !confirm('Este cliente tiene saldo pendiente. ¿Archivarlo igual?')) return;
+    const { error } = await sb.from('customers').update({ archived: !cd.archived }).eq('id', id);
+    if (error) return say(error.message);
+    say(cd.archived ? 'Cliente restaurado.' : 'Cliente archivado. Lo ves en "Ver archivados".'); clientesView();
+  };
   $('#ps').onclick = async () => {
     const amount = +$('#pa').value;
     if (!(amount > 0)) return say('Escribí el monto cobrado.');
+    if (amount > (bal[$('#pc').value] || 0) + 0.004 && !confirm('El cobro es mayor a lo que debe el cliente: le quedaría saldo a favor. ¿Registrarlo igual?')) return;
     const { error } = await sb.from('payments').insert({ business_id: S.bid, customer_id: id, amount, currency: $('#pc').value, method: $('#pm').value });
     if (error) return say(error.message);
     say('Cobro registrado.'); cuentaView(id);
@@ -683,7 +698,7 @@ async function proveedorView(id) {
   ].sort((a, b) => b.d.localeCompare(a.d));
   const bal = {};
   mv.forEach(m => { bal[m.c] = (bal[m.c] || 0) + m.a; });
-  const st = Object.entries(bal).filter(e => Math.abs(e[1]) > 0.004).map(([c, v]) => `${mon(c)}${fmt(v)}`).join(' | ') || 'Al día';
+  const st = Object.entries(bal).filter(e => Math.abs(e[1]) > 0.004).map(([c, v]) => v < 0 ? `a favor ${mon(c)}${fmt(-v)}` : `${mon(c)}${fmt(v)}`).join(' | ') || 'Al día';
   $('#v').innerHTML = `<div class="r"><button class="s" id="bk5">Volver</button></div>
     <div class="t" style="font-size:26px;margin-top:8px">${esc(sd.name || '')}</div>
     <div class="c"><span class="m">Saldo (lo que le debo)</span><div class="t" style="font-size:24px">${st}</div></div>
@@ -703,6 +718,7 @@ async function proveedorView(id) {
   $('#ps').onclick = async () => {
     const amount = +$('#pa').value;
     if (!(amount > 0)) return say('Escribí el monto pagado.');
+    if (amount > (bal[$('#pc').value] || 0) + 0.004 && !confirm('El pago es mayor a lo que le debés: te quedaría saldo a favor. ¿Registrarlo igual?')) return;
     const { error } = await sb.from('supplier_payments').insert({ business_id: S.bid, supplier_id: id, amount, currency: $('#pc').value, method: $('#pm').value });
     if (error) return say(error.message);
     say('Pago registrado.'); proveedorView(id);
@@ -876,14 +892,16 @@ async function stockView(q = '') {
 
 /* ---------- Presupuestos ---------- */
 async function quoView() {
-  $('#v').innerHTML = `<button id="nq">Nuevo presupuesto</button><div id="ql" class="m">Cargando…</div>`;
+  $('#v').innerHTML = `<button id="nq">Nuevo presupuesto</button><button class="s" id="qh">Historial de eliminados (7 días)</button><div id="ql" class="m">Cargando…</div>`;
+  $('#qh').onclick = quoHist;
+  sb.rpc('purge_deleted_quotes', { p_business: S.bid });
   $('#nq').onclick = async () => {
     const d = S.lists.find(l => l.name == 'Minorista') || S.lists[0];
     const { data, error } = await sb.from('quotes').insert({ business_id: S.bid, price_list_id: d.id, currency: d.currency }).select('id').single();
     error ? say(error.message) : quoEdit(data.id);
   };
   const { data, error } = await sb.from('quotes').select('id,number,status,total,currency,customers(name)')
-    .eq('business_id', S.bid).order('number', { ascending: false }).limit(50);
+    .eq('business_id', S.bid).is('deleted_at', null).order('number', { ascending: false }).limit(50);
   if (error) return say(error.message);
   $('#ql').className = 'gr';
   $('#ql').innerHTML = data.length ? data.map(x => `<div class="c" data-q="${x.id}" style="cursor:pointer"><div class="r"><span class="t">${esc(x.customers?.name || 'Cliente ocasional')}</span><span class="t">${mon(x.currency)}${fmt(x.total)}</span></div><div class="m">#${x.number} | ${x.status}</div></div>`).join('')
@@ -891,28 +909,54 @@ async function quoView() {
   document.querySelectorAll('[data-q]').forEach(c => c.onclick = () => quoEdit(c.dataset.q));
 }
 
+async function quoHist() {
+  $('#v').innerHTML = `<button class="s" id="bk7">Volver</button><p class="m">Presupuestos eliminados. A los 7 días se borran para siempre.</p><div id="qhl"></div>`;
+  $('#bk7').onclick = quoView;
+  const { data, error } = await sb.from('quotes').select('id,number,total,currency,deleted_at,customers(name)')
+    .eq('business_id', S.bid).not('deleted_at', 'is', null).order('deleted_at', { ascending: false });
+  if (error) return say(error.message);
+  $('#qhl').innerHTML = data.map(x => {
+    const left = Math.max(0, 7 - Math.floor((Date.now() - new Date(x.deleted_at)) / 864e5));
+    return `<div class="c r"><span><span class="t">${esc(x.customers?.name || 'Cliente ocasional')}</span> <span class="m">#${x.number} | ${mon(x.currency)}${fmt(x.total)} | quedan ${left} días</span></span><button class="s" data-r="${x.id}">Restaurar</button></div>`;
+  }).join('') || '<p class="m">No hay presupuestos eliminados.</p>';
+  document.querySelectorAll('[data-r]').forEach(b => b.onclick = async () => {
+    const { error } = await sb.from('quotes').update({ deleted_at: null }).eq('id', b.dataset.r);
+    error ? say(error.message) : quoHist();
+  });
+}
+
 async function quoEdit(id, q = '') {
   const [qr, ir, cu] = await Promise.all([
     sb.from('quotes').select('*').eq('id', id).single(),
     sb.from('quote_items').select('*').eq('quote_id', id).order('description'),
-    sb.from('customers').select('id,name,phone').eq('business_id', S.bid).order('name')
+    sb.from('customers').select('id,name,phone,archived').eq('business_id', S.bid).order('name')
   ]);
   if (qr.error) return say(qr.error.message);
   if (!S.cat) await catalog();
   const Q = qr.data, items = ir.data || [], cl = cu.data || [], c = cl.find(x => x.id == Q.customer_id);
   const ro = Q.status == 'convertido', dis = ro ? ' disabled' : '', M = mon(Q.currency);
   const hits = q ? S.cat.filter(v => match(v, q)).slice(0, 8) : [];
+  const pq = v => {
+    const p = priceOf(v, Q.price_list_id, 1);
+    if (p || !(+Q.fx > 0)) return { p, note: '' };
+    for (const l of S.lists.filter(l => l.currency != Q.currency)) {
+      const x = priceOf(v, l.id, 1);
+      if (x) return { p: Math.round((Q.currency == 'ARS' ? x * Q.fx : x / Q.fx) * 100) / 100, note: ` desde ${mon(l.currency)}${fmt(x)}` };
+    }
+    return { p: 0, note: '' };
+  };
   $('#v').innerHTML = `<div class="r"><button class="s" id="bk">Volver</button></div><div class="t" style="font-size:26px;margin-top:8px">${esc(c ? c.name : 'Cliente ocasional')}</div><div class="m">Presupuesto #${Q.number} | ${Q.status}</div>
     <label class="m">Lista de precios</label><select id="pl2"${dis}>${S.lists.map(l => `<option value="${l.id}"${l.id == Q.price_list_id ? ' selected' : ''}>Lista ${esc(l.name)} (${l.currency})</option>`).join('')}</select>
-    <label class="m">Cliente</label><select id="cu"${dis}><option value="">Cliente ocasional (sin nombre)</option>${cl.map(x => `<option value="${x.id}"${x.id == Q.customer_id ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}<option value="+">+ Nuevo cliente</option></select>
+    <label class="m">Cotización del dólar (pesos por US$ 1)</label><input id="fx" type="number" step="any" min="0" value="${Q.fx || ''}"${dis}>
+    <label class="m">Cliente</label><select id="cu"${dis}><option value="">Cliente ocasional (sin nombre)</option>${cl.filter(x => !x.archived || x.id == Q.customer_id).map(x => `<option value="${x.id}"${x.id == Q.customer_id ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}<option value="+">+ Nuevo cliente</option></select>
     ${ro ? '' : `<input id="sq" type="search" placeholder="Agregar producto: escribí para buscar" value="${esc(q)}">`}
-    ${hits.map(v => `<button class="s" data-a="${v.id}">${esc(v.name)} (${M}${fmt(priceOf(v, Q.price_list_id, 1))})</button>`).join('')}
+    ${hits.map(v => `<button class="s" data-a="${v.id}">${esc(v.name)} (${M}${fmt(pq(v).p)}${esc(pq(v).note)})</button>`).join('')}
     <div id="it">${items.map(i => `<div class="c" data-i="${i.id}"><div class="r"><span>${esc(i.description)}</span><button class="s x"${dis}>Quitar</button></div>
       <div class="g"><input class="iq" type="number" step="any" value="${i.qty}"${dis}><input class="ip" type="number" step="any" value="${i.unit_price}"${dis}></div>
       <div class="m">Cantidad, precio unitario | Subtotal ${M}${fmt(i.line_total)}</div></div>`).join('') || '<p class="m">Buscá un producto para agregarlo.</p>'}</div>
     <label class="m">Descuento general (%)</label><input id="dc" type="number" step="any" min="0" max="100" value="${Q.discount_pct}"${dis}>
     <div class="r"><span class="t">Total</span><span class="t" style="font-size:22px">${M}${fmt(Q.total)}</span></div>
-    <button class="s" id="pr">Imprimir</button>
+    <button class="s" id="pr">Imprimir</button>${ro ? '' : `<button class="s" id="cvm">Pasar el presupuesto a ${Q.currency == 'ARS' ? 'dólares' : 'pesos'}</button>`}<button class="s" id="dq">Eliminar presupuesto</button>
     ${ro ? '' : `<div class="g"><button id="wa">Enviar por WhatsApp</button><button class="s" id="cv">Convertir en venta</button></div>`}`;
   const upd = async o => { const { error } = await sb.from('quotes').update(o).eq('id', id); error ? say(error.message) : quoEdit(id, q); };
   $('#bk').onclick = quoView;
@@ -945,6 +989,7 @@ async function quoEdit(id, q = '') {
     if (miss) say(`${miss} producto(s) no tienen precio en esa lista.`);
   };
   $('#dc').onchange = e => upd({ discount_pct: Math.min(100, Math.max(0, +e.target.value || 0)) });
+  $('#fx').onchange = e => upd({ fx: +e.target.value > 0 ? +e.target.value : null });
   $('#cu').onchange = async e => {
     let v = e.target.value || null;
     if (v == '+') {
@@ -957,11 +1002,25 @@ async function quoEdit(id, q = '') {
     }
     upd({ customer_id: v });
   };
+  $('#dq').onclick = async () => {
+    if (!confirm('¿Eliminar este presupuesto? Queda 7 días en el historial por si lo querés recuperar.')) return;
+    const { error } = await sb.from('quotes').update({ deleted_at: new Date().toISOString() }).eq('id', id);
+    if (error) return say(error.message);
+    say('Presupuesto eliminado. Podés recuperarlo desde el historial.'); quoView();
+  };
   if (ro) return;
+  $('#cvm').onclick = async () => {
+    const fx = +Q.fx;
+    if (!(fx > 0)) return say('Primero cargá la cotización del dólar.');
+    const to = Q.currency == 'ARS' ? 'USD' : 'ARS', tl = S.lists.find(l => l.currency == to);
+    if (!confirm(`¿Pasar todos los precios a ${to == 'USD' ? 'dólares' : 'pesos'} con cotización ${fmt(fx)}?`)) return;
+    for (const i of items) await sb.from('quote_items').update({ unit_price: Math.round((to == 'USD' ? i.unit_price / fx : i.unit_price * fx) * 100) / 100 }).eq('id', i.id);
+    await upd({ currency: to, ...(tl ? { price_list_id: tl.id } : {}) });
+  };
   $('#sq').onchange = e => quoEdit(id, e.target.value.trim());
   document.querySelectorAll('[data-a]').forEach(b => b.onclick = async () => {
     const v = S.cat.find(x => x.id == b.dataset.a);
-    const { error } = await sb.from('quote_items').insert({ business_id: S.bid, quote_id: id, variant_id: v.id, description: v.name, qty: 1, unit_price: priceOf(v, Q.price_list_id, 1) });
+    const { error } = await sb.from('quote_items').insert({ business_id: S.bid, quote_id: id, variant_id: v.id, description: v.name, qty: 1, unit_price: pq(v).p });
     error ? say(error.message) : quoEdit(id);
   });
   document.querySelectorAll('#it [data-i]').forEach(r => {
