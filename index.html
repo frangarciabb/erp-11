@@ -130,7 +130,7 @@ async function loadWhs() {
 function shell() {
   const adm = S.role != 'seller';
   const tabs = [['prod', 'Productos'], ['stock', 'Stock'], ['quo', 'Presupuestos'], ['cli', 'Clientes'], ['ven', 'Ventas'],
-    ...(adm ? [['imp', 'Importar'], ['pre', 'Precios'], ['aju', 'Ajustes'], ['fac', 'Facturación']] : [])];
+    ...(adm ? [['cmp', 'Compras'], ['imp', 'Importar'], ['pre', 'Precios'], ['aju', 'Ajustes'], ['fac', 'Facturación']] : [])];
   if (!tabs.some(t => t[0] == S.tab)) S.tab = 'prod';
   $('#app').innerHTML = `<div class="sh"><div class="sd"><div class="r"><h1>${esc(S.bname)}</h1><button class="s" id="out">Salir</button></div>
     ${S.whs.length > 1 ? `<select id="wsel">${S.whs.map(w => `<option value="${w.id}"${w.id == S.wh ? ' selected' : ''}>Local: ${esc(w.name)}</option>`).join('')}</select>` : ''}
@@ -138,7 +138,7 @@ function shell() {
   $('#out').onclick = async () => { await sb.auth.signOut(); say(); authView(); };
   if ($('#wsel')) $('#wsel').onchange = e => { S.wh = e.target.value; try { localStorage.setItem('wh' + S.bid, S.wh); } catch (_) {} shell(); };
   document.querySelectorAll('nav button').forEach(b => b.onclick = () => { S.tab = b.dataset.t; say(); shell(); });
-  ({ prod: prodView, stock: stockView, quo: quoView, cli: clientesView, ven: ventasView, imp: impView, pre: preView, aju: ajustesView, fac: facturacionView })[S.tab]();
+  ({ prod: prodView, stock: stockView, quo: quoView, cli: clientesView, ven: ventasView, imp: impView, pre: preView, aju: ajustesView, fac: facturacionView, cmp: comprasView })[S.tab]();
 }
 
 /* ---------- Alta de productos (una o muchas filas) ---------- */
@@ -298,8 +298,8 @@ async function pg(mk) {
   }
 }
 async function catalog() {
-  const d = await pg(() => sb.from('product_variants').select('id,products(name,code),prices(price,price_list_id,min_qty)').eq('business_id', S.bid).order('id'));
-  return (S.cat = d.map(v => ({ id: v.id, name: v.products.name, code: v.products.code || '', prices: v.prices }))
+  const d = await pg(() => sb.from('product_variants').select('id,products(name,code,cost),prices(price,price_list_id,min_qty)').eq('business_id', S.bid).order('id'));
+  return (S.cat = d.map(v => ({ id: v.id, name: v.products.name, code: v.products.code || '', cost: +v.products.cost || 0, prices: v.prices }))
     .sort((a, b) => a.name.localeCompare(b.name)));
 }
 const priceOf = (v, list, q) => {
@@ -578,6 +578,134 @@ async function facturacionView() {
       await fiscal({ action: 'cert', certificate: $('#fcrt').value });
       say('Certificado guardado.'); facturacionView();
     } catch (e) { say(e.message); }
+  };
+}
+
+/* ---------- Compras y proveedores ---------- */
+async function comprasView() {
+  $('#v').innerHTML = `<div class="g"><button id="nc2">Nueva compra</button><button class="s" id="pv">Proveedores</button></div><div id="cl2" class="m">Cargando…</div>`;
+  $('#nc2').onclick = () => { S.cart = []; S.cp = { supplier: '', currency: 'ARS', acc: false, upd: true }; compraView(); };
+  $('#pv').onclick = proveedoresView;
+  const { data, error } = await sb.from('purchases').select('id,total,currency,on_account,created_at,suppliers(name),purchase_items(description,qty,unit_cost)')
+    .eq('business_id', S.bid).order('created_at', { ascending: false }).limit(50);
+  if (error) return say(error.message);
+  $('#cl2').className = 'gr';
+  $('#cl2').innerHTML = data.map(p => `<details class="c"><summary><div class="r"><span class="t">${esc(p.suppliers?.name || 'Sin proveedor')}</span><span class="t">${mon(p.currency)}${fmt(p.total)}</span></div>
+    <div class="m">${new Date(p.created_at).toLocaleDateString('es-AR')}${p.on_account ? ' | a cuenta' : ''}</div></summary>
+    ${p.purchase_items.map(i => `<div class="r"><span>${esc(i.description)} x${i.qty}</span><span class="m">${mon(p.currency)}${fmt(i.unit_cost)} c/u</span></div>`).join('')}</details>`).join('') || '<p class="m">Todavía no hay compras.</p>';
+}
+
+async function compraView(q = '') {
+  if (!S.cat) await catalog();
+  const sup = (await sb.from('suppliers').select('id,name').eq('business_id', S.bid).order('name')).data || [];
+  const hits = q ? S.cat.filter(v => match(v, q)).slice(0, 8) : [];
+  const tot = S.cart.reduce((t, i) => t + i.qty * i.cost, 0), M = mon(S.cp.currency);
+  $('#v').innerHTML = `<div class="r"><button class="s" id="bk3">Volver</button><span class="m">Ingresa al local: ${esc(S.whs.find(w => w.id == S.wh)?.name || '')}</span></div>
+    <label class="m">Proveedor</label><select id="cs1"><option value="">Sin proveedor</option>${sup.map(x => `<option value="${x.id}"${x.id == S.cp.supplier ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}<option value="+">+ Nuevo proveedor</option></select>
+    <div class="g"><select id="cm1"><option value="ARS"${S.cp.currency == 'ARS' ? ' selected' : ''}>Pesos</option><option value="USD"${S.cp.currency == 'USD' ? ' selected' : ''}>Dólares</option></select>
+      <select id="ca1"><option value="0"${S.cp.acc ? '' : ' selected'}>Pagada</option><option value="1"${S.cp.acc ? ' selected' : ''}>A cuenta (la debo)</option></select></div>
+    <input id="sq1" type="search" placeholder="Agregar producto: escribí para buscar" value="${esc(q)}">
+    ${hits.map(v => `<button class="s" data-a="${v.id}">${esc(v.name)}</button>`).join('')}
+    ${S.cart.map((i, n) => `<div class="c"><div class="r"><span>${esc(i.name)}</span><button class="s x" data-n="${n}">Quitar</button></div>
+      <div class="g"><input class="cq" data-n="${n}" type="number" step="any" value="${i.qty}"><input class="cc" data-n="${n}" type="number" step="any" value="${i.cost}"></div>
+      <div class="m">Cantidad, costo unitario | Subtotal ${M}${fmt(i.qty * i.cost)}</div></div>`).join('') || '<p class="m">Buscá un producto para agregarlo.</p>'}
+    <label class="m" style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="cu1" style="width:auto;margin:0"${S.cp.upd ? ' checked' : ''}> Actualizar el costo de los productos</label>
+    <div class="r"><span class="t">Total</span><span class="t" style="font-size:22px">${M}${fmt(tot)}</span></div><button id="cg">Registrar compra</button>`;
+  $('#bk3').onclick = comprasView;
+  $('#cs1').onchange = async e => {
+    if (e.target.value == '+') {
+      const n = prompt('Nombre del proveedor');
+      if (!n) return compraView(q);
+      const r = await sb.from('suppliers').insert({ business_id: S.bid, name: n.trim() }).select('id').single();
+      if (r.error) return say(r.error.message);
+      S.cp.supplier = r.data.id;
+    } else S.cp.supplier = e.target.value;
+    compraView(q);
+  };
+  $('#cm1').onchange = e => { S.cp.currency = e.target.value; compraView(q); };
+  $('#ca1').onchange = e => { S.cp.acc = e.target.value == '1'; compraView(q); };
+  $('#cu1').onchange = e => { S.cp.upd = e.target.checked; };
+  $('#sq1').onchange = e => compraView(e.target.value.trim());
+  document.querySelectorAll('[data-a]').forEach(b => b.onclick = () => {
+    const v = S.cat.find(x => x.id == b.dataset.a);
+    S.cart.push({ id: v.id, name: v.name, qty: 1, cost: v.cost || 0 }); compraView();
+  });
+  document.querySelectorAll('.cq').forEach(i => i.onchange = () => { S.cart[+i.dataset.n].qty = +i.value || 1; compraView(q); });
+  document.querySelectorAll('.cc').forEach(i => i.onchange = () => { S.cart[+i.dataset.n].cost = +i.value || 0; compraView(q); });
+  document.querySelectorAll('#v .x').forEach(b => b.onclick = () => { S.cart.splice(+b.dataset.n, 1); compraView(q); });
+  $('#cg').onclick = async () => {
+    if (!S.cart.length) return say('Agregá al menos un producto.');
+    if (S.cp.acc && !S.cp.supplier) return say('Para dejar la compra a cuenta, elegí un proveedor.');
+    const { error } = await sb.rpc('register_purchase', {
+      p_supplier: S.cp.supplier || null, p_warehouse: S.wh, p_currency: S.cp.currency, p_on_account: S.cp.acc, p_note: null,
+      p_items: S.cart.map(i => ({ variant_id: i.id, qty: i.qty, cost: i.cost })), p_update_cost: S.cp.upd
+    });
+    if (error) return say(error.message);
+    S.cat = null; S.cart = []; say('Compra registrada. El stock ya subió.'); comprasView();
+  };
+}
+
+async function proveedoresView() {
+  $('#v').innerHTML = `<div class="r"><button class="s" id="bk4">Volver</button></div>
+    <details class="c"><summary class="t">+ Nuevo proveedor</summary><input id="sn" placeholder="Nombre"><input id="sp" placeholder="Teléfono o WhatsApp"><input id="st" placeholder="CUIT (opcional)"><button id="ss">Guardar proveedor</button></details>
+    <div id="sl2" class="m">Cargando…</div>`;
+  $('#bk4').onclick = comprasView;
+  $('#ss').onclick = async () => {
+    const name = $('#sn').value.trim();
+    if (!name) return say('Falta el nombre del proveedor.');
+    const { error } = await sb.from('suppliers').insert({ business_id: S.bid, name, phone: $('#sp').value.trim() || null, tax_id: $('#st').value.trim() || null });
+    error ? say(error.message) : proveedoresView();
+  };
+  const [su, bl] = await Promise.all([
+    pg(() => sb.from('suppliers').select('id,name,phone').eq('business_id', S.bid).order('name')),
+    pg(() => sb.from('supplier_balances').select('supplier_id,currency,balance').eq('business_id', S.bid).order('supplier_id').order('currency'))
+  ]);
+  const bal = {};
+  bl.forEach(b => { if (+b.balance) (bal[b.supplier_id] = bal[b.supplier_id] || []).push(b); });
+  $('#sl2').className = 'gr';
+  $('#sl2').innerHTML = su.map(x => {
+    const t = (bal[x.id] || []).map(b => `${mon(b.currency)}${fmt(b.balance)}`).join(' | ');
+    return `<div class="c" data-p="${x.id}" style="cursor:pointer"><div class="r"><span class="t">${esc(x.name)}</span><span class="t"${t ? ' style="color:#c0392b"' : ''}>${t || 'Al día'}</span></div><div class="m">${esc(x.phone || '')}</div></div>`;
+  }).join('') || '<p class="m">Todavía no hay proveedores.</p>';
+  document.querySelectorAll('[data-p]').forEach(e => e.onclick = () => proveedorView(e.dataset.p));
+}
+
+async function proveedorView(id) {
+  const [sr, pu, pa] = await Promise.all([
+    sb.from('suppliers').select('name,phone,tax_id').eq('id', id).single(),
+    sb.from('purchases').select('total,currency,created_at').eq('supplier_id', id).eq('on_account', true).order('created_at', { ascending: false }).limit(100),
+    sb.from('supplier_payments').select('amount,currency,method,created_at').eq('supplier_id', id).order('created_at', { ascending: false }).limit(100)
+  ]);
+  const sd = sr.data || {};
+  const mv = [
+    ...(pu.data || []).map(x => ({ d: x.created_at, t: 'Compra a cuenta', a: +x.total, c: x.currency })),
+    ...(pa.data || []).map(x => ({ d: x.created_at, t: `Pago (${x.method})`, a: -x.amount, c: x.currency }))
+  ].sort((a, b) => b.d.localeCompare(a.d));
+  const bal = {};
+  mv.forEach(m => { bal[m.c] = (bal[m.c] || 0) + m.a; });
+  const st = Object.entries(bal).filter(e => Math.abs(e[1]) > 0.004).map(([c, v]) => `${mon(c)}${fmt(v)}`).join(' | ') || 'Al día';
+  $('#v').innerHTML = `<div class="r"><button class="s" id="bk5">Volver</button></div>
+    <div class="t" style="font-size:26px;margin-top:8px">${esc(sd.name || '')}</div>
+    <div class="c"><span class="m">Saldo (lo que le debo)</span><div class="t" style="font-size:24px">${st}</div></div>
+    <details class="c"><summary class="t">Editar datos</summary><input id="pn" placeholder="Nombre" value="${esc(sd.name || '')}"><input id="pp" placeholder="Teléfono o WhatsApp" value="${esc(sd.phone || '')}"><input id="pt" placeholder="CUIT" value="${esc(sd.tax_id || '')}"><button id="pe">Guardar cambios</button></details>
+    <details class="c"><summary class="t">Registrar pago</summary><input id="pa" type="number" step="any" min="0" placeholder="Monto">
+      <select id="pc"><option value="ARS">Pesos</option><option value="USD">Dólares</option></select>
+      <select id="pm"><option>efectivo</option><option>transferencia</option><option>cheque</option><option>otro</option></select><button id="ps">Guardar pago</button></details>
+    ${mv.map(m => `<div class="c r"><span>${new Date(m.d).toLocaleDateString('es-AR')} <span class="m">${m.t}</span></span><span class="t">${m.a < 0 ? '-' : ''}${mon(m.c)}${fmt(Math.abs(m.a))}</span></div>`).join('') || '<p class="m">Sin movimientos.</p>'}`;
+  $('#bk5').onclick = proveedoresView;
+  $('#pe').onclick = async () => {
+    const name = $('#pn').value.trim();
+    if (!name) return say('El nombre no puede quedar vacío.');
+    const { error } = await sb.from('suppliers').update({ name, phone: $('#pp').value.trim() || null, tax_id: $('#pt').value.trim() || null }).eq('id', id);
+    if (error) return say(error.message);
+    say('Proveedor actualizado.'); proveedorView(id);
+  };
+  $('#ps').onclick = async () => {
+    const amount = +$('#pa').value;
+    if (!(amount > 0)) return say('Escribí el monto pagado.');
+    const { error } = await sb.from('supplier_payments').insert({ business_id: S.bid, supplier_id: id, amount, currency: $('#pc').value, method: $('#pm').value });
+    if (error) return say(error.message);
+    say('Pago registrado.'); proveedorView(id);
   };
 }
 
